@@ -4316,12 +4316,12 @@ impl ScriptRuntime {
             11 => {
                 // Newer sub_458C10 resolves the operand through sub_458740,
                 // including variable/argument references used by SE callbacks.
-                let point_id = if assets.registered_softpal {
-                    let point = self.fetch_operand(script)?;
-                    self.eval_operand(point, mem_dat)? as u32
-                } else {
-                    self.fetch_u32(script)?
-                };
+                // Builds whose gosub reads a raw word behave identically for
+                // plain point ids (top nibble zero decodes as an immediate).
+                // Some non-registered builds also resolve the operand, and
+                // their scripts emit e.g. 0x40000001 (var[1]), so always decode.
+                let point = self.fetch_operand(script)?;
+                let point_id = self.eval_operand(point, mem_dat)? as u32;
                 self.vm_trace(format_args!(
                     "  op gosub point={point_id} return_pc=0x{:08X}",
                     self.pc
@@ -19043,6 +19043,32 @@ mod tests {
             assert_eq!(vm.pc, 16);
             assert_eq!(vm.stack, [777]);
         }
+    }
+
+    #[test]
+    fn gosub_resolves_variable_point_operand_without_registered_profile() {
+        let (mut assets, _) = empty_core_assets(false);
+        assert!(!assets.registered_softpal);
+        // pc 12: gosub var[1]; pc 20: end.
+        assets.script.bytes = [b"Sv20".as_slice(), &0u32.to_le_bytes(), &12u32.to_le_bytes(),
+            &0x0001_000Bu32.to_le_bytes(), &0x4000_0001u32.to_le_bytes(),
+            &0x0001_0015u32.to_le_bytes()].concat();
+        // Point 1 targets code-relative offset 8, i.e. pc 20.
+        let points = PointTable::parse(&8u32.to_le_bytes()).unwrap();
+        let script = assets.script_image().unwrap();
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.vars[1] = 1;
+        vm.step(&script, &points, &[], &assets, None, None, None, None, None).unwrap();
+        assert_eq!(vm.pc, 20);
+        assert_eq!(vm.call_stack, [20]);
+
+        // A plain immediate id keeps the raw-word behaviour.
+        assets.script.bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let script = assets.script_image().unwrap();
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.step(&script, &points, &[], &assets, None, None, None, None, None).unwrap();
+        assert_eq!(vm.pc, 20);
+        assert_eq!(vm.call_stack, [20]);
     }
 
     #[test]

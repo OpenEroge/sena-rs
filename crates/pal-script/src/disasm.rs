@@ -190,10 +190,22 @@ pub fn disassemble_script(
                 });
             }
             11 => {
+                // The gosub target is an ordinary operand: plain point ids
+                // decode as immediates, while flagged words (for example
+                // 0x40000001 = var[1]) select the id at run time.
                 let raw = read_instruction_u32(script, &mut pc, end)?;
-                let id = raw;
-                let target_pc = resolve_point(options.point_table, id)?;
-                args.push(Argument::Point { id, target_pc });
+                let operand = Operand::decode(raw);
+                match immediate_point_id(operand) {
+                    Some(id) => {
+                        let target_pc = resolve_point(options.point_table, id)?;
+                        args.push(Argument::Point { id, target_pc });
+                    }
+                    None => args.push(Argument::PointOperand {
+                        operand,
+                        point_id: None,
+                        target_pc: None,
+                    }),
+                }
             }
             _ => {
                 let argc = meta.map(|item| item.argc).unwrap_or(0);
