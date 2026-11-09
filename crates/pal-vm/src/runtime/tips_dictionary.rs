@@ -1,5 +1,5 @@
 //! trenka.exe dictionary ("TIPS") table, save-folder string helpers and the
-//! global word table (category 18 indices 50, 59, 72, 73, 79, 82..87).
+//! global word table (category 18 indices 50, 59, 72, 73, 79, 82..87, 108).
 //!
 //! Native 0x41C880 parses a four-column CSV (name, reading, small image,
 //! large image) into 0x6C-byte records that also keep a kana row index and
@@ -136,7 +136,7 @@ impl ScriptRuntime {
         nls: Nls,
         resource_manager: Option<&mut ResourceManager>,
     ) -> ExtCallOutcome {
-        if !assets.native_build.has_tips_dictionary() {
+        if !assets.native_build.defines_system_extensions() {
             return ExtCallOutcome::Skip;
         }
         match index {
@@ -162,6 +162,8 @@ impl ScriptRuntime {
                     ExtCallOutcome::Continue
                 }
             }
+            // 0x41E8C0 reads the scene-skip latch that 9:51/9:52 set and clear.
+            108 => ExtCallOutcome::Value(i32::from(self.scene_skip_active)),
             79 => {
                 // 0x41BD00 stores a word (0x832FE4) no audited wrapper reads.
                 if self.pop_ext_args(1).is_empty() {

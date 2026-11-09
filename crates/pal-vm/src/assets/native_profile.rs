@@ -46,9 +46,10 @@ impl NativeBuild {
         self == NativeBuild::Trenka
     }
 
-    /// trenka.exe defines the dictionary table and save-folder helpers at
-    /// 18:50, 18:59 and 18:82..87 (0x419F40, 0x41BAA0, 0x41C320..0x41D790).
-    pub fn has_tips_dictionary(self) -> bool {
+    /// trenka.exe defines extra category 18 wrappers: the dictionary table,
+    /// save-folder helpers, a global word table and the scene-skip query
+    /// (18:50, 59, 72, 73, 79, 82..87, 108; see runtime/tips_dictionary.rs).
+    pub fn defines_system_extensions(self) -> bool {
         self == NativeBuild::Trenka
     }
 
