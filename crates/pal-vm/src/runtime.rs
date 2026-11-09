@@ -86,6 +86,7 @@ mod host_checkpoint;
 mod history_navigation;
 use buttons::{ButtonSounds, PendingButtonReaction};
 mod tips;
+mod tips_dictionary;
 use tips::{SavedTipsState, TipsState};
 use select::SelectSubsystemState;
 
@@ -558,6 +559,7 @@ pub struct ScriptRuntime {
     font_state: PalFontSystem,
     text_state: TextSubsystemState,
     tips_state: TipsState,
+    tips_dictionary: tips_dictionary::TipsDictionary,
     /// Text skip latch (koikake.exe ADVctx+0x31828, written by skip_set
     /// 0x428E10, read through GetSkipState 0x437800 bit 0).  The ADV text
     /// task consults it every frame while deciding whether to bypass waits.
@@ -1554,6 +1556,7 @@ impl ScriptRuntime {
             font_state: PalFontSystem::new(),
             text_state: TextSubsystemState::default(),
             tips_state: TipsState::default(),
+            tips_dictionary: Default::default(),
             text_skip_enabled: false,
             text_auto_enabled: false,
             scene_skip_active: false,
@@ -5569,7 +5572,7 @@ impl ScriptRuntime {
                 // drives wait_sync and renderer effects.
                 119 if assets.registered_softpal => self.ext_string_substr_bytes(assets, nls),
                 121 => ExtCallOutcome::Value(self.pal_time_ms as i32),
-                _ => ExtCallOutcome::Skip,
+                _ => self.dispatch_build_system_ext(index, assets, nls, resource_manager),
             },
             7 => self.dispatch_wait_ext(index),
             8 => self.dispatch_button_ext(index, assets, nls, resource_manager, sprites, input, audio),

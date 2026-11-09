@@ -46,6 +46,12 @@ impl NativeBuild {
         self == NativeBuild::Trenka
     }
 
+    /// trenka.exe defines the dictionary table and save-folder helpers at
+    /// 18:50, 18:59 and 18:82..87 (0x419F40, 0x41BAA0, 0x41C320..0x41D790).
+    pub fn has_tips_dictionary(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
     /// Whether this build's wrapper at `category:index` follows the
     /// registered contract independently of the DLL capability markers.
     pub fn shares_registered_extcall(self, category: u16, index: u16) -> bool {
