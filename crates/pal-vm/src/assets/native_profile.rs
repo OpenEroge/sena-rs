@@ -28,6 +28,7 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
     (2, 47, 47),
     (3, 59, 59),
     (5, 0, 14),
+    (8, 42, 42),
     (9, 57, 57),
     (10, 37, 39),
     (14, 13, 19),
@@ -47,9 +48,10 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 /// - 3:32 `sp_create` (0x4267D0): slot, File.dat name, x, y, width, height.
 /// - 3:38 `sp_bitblt` (0x426FD0): nine operands, sprite-to-sprite copy.
 /// - 3:58 `drawtext` (0x42A3F0): wrapped text into an existing sprite.
-/// - 9:48 `set_cursor` (0x438970): name, hotspot x, hotspot y.
 /// - 10:29 (0x4317C0): swap two save slots through `save_tmp.dat`.
-/// - 18:17 (0x4182C0): no operands; returns an executable build stamp.
+/// - Small wrappers in `runtime/trenka_wrappers.rs`: 2:35, 3:42, 3:43, 4:5,
+///   4:16, 4:17, 8:28, 8:30, 9:48, 15:1, 15:9, 18:17, 18:43..48, 18:76,
+///   18:109, 18:113..115.
 /// - 8:27 `btn_blt` (0x40FEA0), 8:31/8:32 button tips word (0x410610/0x410720).
 /// - 14:25 (0x42D1A0): per-record backlog separator sprite.
 /// - 18:50, 57, 59..68, 72, 73, 79, 82..87, 106..108: dictionary table,
@@ -57,23 +59,32 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 ///   table, the texture-allocation hint and the scene-skip query.
 const TRENKA_OWN_EXTCALLS: &[(u16, u16, u16)] = &[
     (2, 18, 20),
+    (2, 35, 35),
     (3, 13, 13),
     (3, 32, 32),
     (3, 38, 38),
+    (3, 42, 43),
     (3, 58, 58),
-    (8, 27, 27),
-    (8, 31, 32),
+    (4, 5, 5),
+    (4, 16, 17),
+    (8, 27, 28),
+    (8, 30, 32),
     (9, 48, 48),
     (10, 29, 29),
     (14, 25, 25),
+    (15, 1, 1),
+    (15, 9, 9),
     (18, 17, 17),
+    (18, 43, 48),
     (18, 50, 50),
     (18, 57, 57),
     (18, 59, 68),
     (18, 72, 73),
+    (18, 76, 76),
     (18, 79, 79),
     (18, 82, 87),
-    (18, 106, 108),
+    (18, 106, 109),
+    (18, 113, 115),
 ];
 
 fn table_contains(table: &[(u16, u16, u16)], category: u16, index: u16) -> bool {

@@ -92,7 +92,12 @@ present slot does not mean Sena implements the handler's semantics.
   records the backlog line the pair skips, 3:38 `sp_bitblt` pops nine words
   (sprite-to-sprite copy), 9:48 `set_cursor` pops name and hotspot,
   9:55 `get_font_color` pops a selector (all builds), 10:29 swaps two save
-  slots through `save_tmp.dat`, 18:17 pops nothing.
+  slots through `save_tmp.dat`, 18:17 pops nothing. With the small
+  wrappers in `runtime/trenka_wrappers.rs` (2:35, 3:42/43, 4:5, 4:16/17,
+  8:28/30, 15:1/9, 18:43..48, 18:76, 18:109, 18:113..115) and 8:42 shared
+  with the registered builds, every one of the 419 extcall coordinates the
+  script uses pops what the native wrapper pops (18:9 wsprint pops its
+  padded operands in a loop; 11:2 pops through sp_cls).
 - 3:58 `drawtext` (0x42A3F0) pops slot, text, x, y, mode and typesets the
   text into an existing sprite with the message-window renderer 0x43CC30
   (text_init font size, wrap width and pitch; also used by the backlog).

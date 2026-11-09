@@ -87,6 +87,7 @@ mod history_navigation;
 use buttons::{ButtonSounds, PendingButtonReaction};
 mod tips;
 mod tips_dictionary;
+mod trenka_wrappers;
 mod voice_favorites;
 use tips::{SavedTipsState, TipsState};
 use select::SelectSubsystemState;
@@ -496,6 +497,10 @@ pub struct ScriptRuntime {
     game_buttons: BTreeMap<(i32, i32), GameButtonEntry>,
     /// trenka 8:31 words kept per button record (TIPS window entry ids).
     button_tips: BTreeMap<(i32, i32), i32>,
+    /// trenka 8:28 links between button records of a group.
+    button_links: BTreeMap<(i32, i32), i32>,
+    /// trenka 18:113/18:114 target of 18:115 appends (inside the save folder).
+    append_file: Option<PathBuf>,
     next_button_registration: u64,
     /// Native `btn_init` group records: normal/hover resource ids plus the
     /// current onmouse index returned by category 8 index 23.
@@ -1519,6 +1524,8 @@ impl ScriptRuntime {
             pending_msp_wait_slot: None,
             game_buttons: BTreeMap::new(),
             button_tips: BTreeMap::new(),
+            button_links: BTreeMap::new(),
+            append_file: None,
             next_button_registration: 1,
             button_groups: BTreeMap::new(),
             button_push_queue: BTreeMap::new(),
@@ -5139,7 +5146,7 @@ impl ScriptRuntime {
         resource_manager: Option<&mut ResourceManager>,
         mut sprites: Option<&mut SpriteSystem>,
         task_system: Option<&mut TaskSystem>,
-        audio: Option<&mut AudioSystem>,
+        mut audio: Option<&mut AudioSystem>,
         input: Option<&PalInputState>,
     ) -> ExtCallOutcome {
         self.input_registered_profile = assets.registered_softpal;
@@ -5152,6 +5159,18 @@ impl ScriptRuntime {
         let nls = resource_manager.as_ref().map(|manager| manager.nls()).unwrap_or(Nls::ShiftJis);
         if let Some(sprites) = sprites.as_deref_mut() {
             sprites.set_registered_profile(assets.registered_softpal);
+        }
+        if assets.native_build.defines_extcall(category, index) {
+            if let Some(outcome) = self.dispatch_trenka_wrapper(
+                category,
+                index,
+                assets,
+                nls,
+                resource_manager.as_deref(),
+                audio.as_deref_mut(),
+            ) {
+                return outcome;
+            }
         }
         if assets.registered_extcall(category, index) {
             match (category, index) {
@@ -5618,9 +5637,6 @@ impl ScriptRuntime {
                 13 => self.ext_process_checkpoint_set(),
                 14 => self.ext_update_access(assets, nls),
                 15 => self.ext_system_task_value(),
-                // trenka 0x4182C0 pops nothing and returns a stamp decoded from
-                // the executable image; only an unreferenced point reads it.
-                17 if assets.native_build.defines_extcall(18, 17) => ExtCallOutcome::Value(0),
                 17 => self.ext_work_process_value(),
                 18 => self.ext_string_replace(assets, nls),
                 21 => self.ext_strlenf(assets, nls),
@@ -5646,13 +5662,6 @@ impl ScriptRuntime {
             },
             7 => self.dispatch_wait_ext(index),
             8 => self.dispatch_button_ext(index, assets, nls, resource_manager, sprites, input, audio),
-            // trenka set_cursor (0x438970) also pops the hotspot x and y; the
-            // portable cursor stays the default arrow.
-            9 if index == 48 && assets.native_build.defines_extcall(9, 48) => {
-                self.pop_ext_args(3);
-                self.system_state.set_cursor_null(true);
-                ExtCallOutcome::Value(1)
-            }
             9 => self.dispatch_font_system_stub(index, input),
             10 => self.dispatch_save_stub(index, assets, nls, resource_manager, sprites),
             12 => self.dispatch_system_button_stub(index),
@@ -6830,7 +6839,7 @@ impl ScriptRuntime {
             38 if assets.registered_softpal => return self.ext_btn_get_reaction(sprites, input, audio),
             39 if assets.registered_softpal => return self.ext_btn_get_toggle(),
             40 if assets.registered_softpal => return self.ext_btn_get_info(sprites.as_deref()),
-            42..=48 if assets.registered_softpal => return self.dispatch_button_extensions(index, sprites, input),
+            42..=48 if assets.registered_extcall(8, index) => return self.dispatch_button_extensions(index, sprites, input),
             41 => {
                 // The table-driven button constructor carries the regular
                 // btn_set fields followed by its source rectangle dimensions.
@@ -19052,6 +19061,27 @@ mod tests {
         assert_eq!(outcome, ExtCallOutcome::Value(1));
         assert!(vm.stack.is_empty());
         assert_eq!(vm.history_state.records.len(), 1);
+    }
+
+    #[test]
+    fn trenka_wrappers_pop_their_operands_and_link_buttons() {
+        let (mut assets, points) = empty_core_assets(false);
+        assets.native_build = crate::assets::NativeBuild::Trenka;
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let mut call = |vm: &mut ScriptRuntime, cat, idx, stack: Vec<i32>| {
+            vm.stack = stack;
+            let outcome =
+                vm.dispatch_extcall(cat, idx, &[], &assets, &points, None, None, None, None, None);
+            (outcome, vm.stack.len())
+        };
+        assert_eq!(call(&mut vm, 8, 28, vec![9, 5, 2, 3]), (ExtCallOutcome::Value(1), 1));
+        assert_eq!(call(&mut vm, 8, 30, vec![9, 5, 3]), (ExtCallOutcome::Value(2), 1));
+        let (a, b) = (vm.store_dynamic_string("Abc".into()), vm.store_dynamic_string("aBC".into()));
+        assert_eq!(call(&mut vm, 18, 109, vec![9, b, a]), (ExtCallOutcome::Value(0), 1));
+        assert_eq!(call(&mut vm, 18, 44, vec![9, 1, 2, 3, 4]), (ExtCallOutcome::Value(0), 1));
+        assert_eq!(call(&mut vm, 4, 16, vec![9, -1]), (ExtCallOutcome::Value(-1), 1));
+        let dst = [0; 3].map(|_| vm.store_dynamic_string(String::new()));
+        assert_eq!(call(&mut vm, 2, 35, vec![9, dst[2], dst[1], dst[0]]), (ExtCallOutcome::Value(1), 1));
     }
 
     #[test]
