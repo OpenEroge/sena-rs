@@ -154,7 +154,10 @@ impl ScriptRuntime {
                     audio.load_static_data(asset.name, data, PalSoundGroup::GROUP5)
                 })();
                 match result {
-                    Ok(handle) => handles[lane] = Some(handle),
+                    Ok(handle) => {
+                        log::debug!("[trace-button] group={group} sound lane={lane} id={id} name={name:?} handle={handle:?}");
+                        handles[lane] = Some(handle);
+                    }
                     Err(error) => log::debug!("button sound {name:?} could not load: {error}"),
                 }
             }

@@ -50,6 +50,10 @@ pub struct SenaConfig {
     pub headless: bool,
     pub diagnostic_frames: usize,
     pub diagnostic_frame_ms: u64,
+    /// Pace headless frames against the wall clock. Without it frames run
+    /// as fast as possible, so device audio (which plays in real time)
+    /// lags the VM clock and audio-gated waits never complete.
+    pub diagnostic_realtime: bool,
     pub fixed_timestep_ms: Option<u64>,
     pub diagnostic_png: Option<PathBuf>,
     pub diagnostic_png_at: Vec<DiagnosticPngAt>,
@@ -130,6 +134,7 @@ impl Default for SenaConfig {
             headless: false,
             diagnostic_frames: 120,
             diagnostic_frame_ms: 16,
+            diagnostic_realtime: false,
             fixed_timestep_ms: None,
             diagnostic_png: None,
             diagnostic_png_at: Vec::new(),
@@ -184,7 +189,14 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
     let mut last_auto_advance_press = None;
     let mut click_when_hit_done = vec![false; config.diagnostic_click_when_hit_enabled.len()];
     let mut click_when_hit_release = None;
+    let realtime_start = Instant::now();
     for frame_index in 0..config.diagnostic_frames {
+        if config.diagnostic_realtime {
+            let due = Duration::from_millis(config.frame_step_ms().saturating_mul(frame_index as u64));
+            if let Some(wait) = due.checked_sub(realtime_start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
         engine.input_begin_frame();
         if click_when_hit_release == Some(frame_index) {
             engine.handle_event(PalEvent::Input(InputEvent::MouseInput {

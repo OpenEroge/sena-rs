@@ -103,9 +103,15 @@ struct Args {
     #[arg(long, default_value_t = 120)]
     diagnostic_frames: usize,
 
-    /// Real-time delay between --headless diagnostic frames.
+    /// VM step per --headless diagnostic frame when --fixed-timestep-ms is
+    /// not given. Frames are not slept unless --diagnostic-realtime is set.
     #[arg(long, default_value_t = 16)]
     diagnostic_frame_ms: u64,
+
+    /// Pace --headless frames to wall-clock time so device audio stays in
+    /// step with the VM clock (needed when audio playback gates script waits).
+    #[arg(long)]
+    diagnostic_realtime: bool,
 
     /// Use a fixed VM timestep in both GUI and headless modes.
     #[arg(long)]
@@ -204,6 +210,7 @@ fn main() -> anyhow::Result<()> {
         headless: args.headless,
         diagnostic_frames: args.diagnostic_frames,
         diagnostic_frame_ms: args.diagnostic_frame_ms,
+        diagnostic_realtime: args.diagnostic_realtime,
         fixed_timestep_ms: args.fixed_timestep_ms,
         diagnostic_png: args.diagnostic_png,
         diagnostic_png_at: args.diagnostic_png_at,
