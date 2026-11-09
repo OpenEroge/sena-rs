@@ -1070,10 +1070,13 @@ struct SaveSubsystemState {
     mosaic_enabled: bool,
     capture_from_screen: bool,
     text_rect: [i32; 4],
+    /// Save label font block (native ctx+0x2248..0x2254): size, type,
+    /// effect and (color, effect color). Native draws always apply every
+    /// word; the context starts zeroed.
     font_size: i32,
     font_type: i32,
     font_effect: i32,
-    font_color: i32,
+    font_colors: [i32; 2],
     locked: bool,
     /// Set by `savepoint` and cleared by `save_point_clear`. Native `save`
     /// returns success without writing when this latch is clear.
@@ -7192,7 +7195,9 @@ impl ScriptRuntime {
             }
             27 => {
                 let args = self.pop_ext_args(2);
-                self.save_state.font_color = args.first().copied().unwrap_or(0);
+                if let [color, effect_color] = args[..] {
+                    self.save_state.font_colors = [color, effect_color];
+                }
                 ExtCallOutcome::Value(1)
             }
             33 => self.ext_is_save_lock(resource_manager),
@@ -7399,7 +7404,11 @@ impl ScriptRuntime {
             .as_deref()
             .and_then(|manager| read_original_save_prefix(manager.root(), save_slot).ok())
             .or_else(|| {
+                // Only a save made in this session may stand in for a file
+                // that could not be read; queries such as is_save_lock also
+                // move last_slot and must not borrow the live thumbnail.
                 (self.save_state.last_slot == save_slot
+                    && self.save_state.snapshots.contains_key(&save_slot)
                     && !self.save_state.thumbnail_pixels.is_empty())
                 .then(|| self.current_save_prefix(save_slot))
             });
@@ -7632,43 +7641,7 @@ impl ScriptRuntime {
             return ExtCallOutcome::Value(1);
         };
         let text = format_save_time(modified, format_mode);
-        let Some(sprites) = sprites else {
-            return ExtCallOutcome::Value(1);
-        };
-        let saved_size = self.font_state.font_size();
-        self.font_state
-            .set_font_size(self.save_state.font_size.max(18) as u16);
-        let (width, height, rgba) = self.font_state.rasterize(&text);
-        self.font_state.set_font_size(saved_size);
-        let priority = self.save_drawing_priority(sprites, sprite_slot);
-        if let Some(handle) = self
-            .save_state
-            .text_sprites
-            .get(&(sprite_slot, x, y))
-            .copied()
-        {
-            let _ = sprites.replace_sprite_surface(
-                handle,
-                width,
-                height,
-                rgba,
-                format!("save-time:{filename}:{text}"),
-            );
-            let _ = sprites.set_pos(handle, x, y, 0);
-            let _ = sprites.set_priority(handle, priority);
-            let _ = sprites.view_ctrl(handle, true);
-        } else if let Some(handle) = sprites.create_rgba_sprite(
-            width,
-            height,
-            rgba,
-            PalVec3::new(x, y, 0),
-            priority,
-            format!("save-time:{filename}:{text}"),
-        ) {
-            self.save_state
-                .text_sprites
-                .insert((sprite_slot, x, y), handle);
-        }
+        self.place_save_label(sprites, sprite_slot, x, y, &text, "save-time");
         log::debug!(
             "[trace-save] savetimedraw slot={sprite_slot} save_slot={save_slot} path={} text={text:?} pos=({x},{y}) mode={format_mode}",
             path.display()
@@ -7726,6 +7699,13 @@ impl ScriptRuntime {
         if title.is_empty() {
             return ExtCallOutcome::Value(1);
         }
+        let [width_limit, height_limit, ..] = self.save_state.text_rect;
+        let size = self.save_font_size();
+        let title = self.with_save_font(|font| {
+            wrap_save_title(&title, size, width_limit, height_limit, |ch| {
+                font.native_size(ch.encode_utf8(&mut [0; 4])).0 as i32
+            })
+        });
         self.place_save_label(sprites, args[0], args[2], args[3], &title, "save-text");
         log::debug!(
             "[trace-save] savetextdraw slot={} save_slot={} text={title:?} pos=({},{})",
@@ -7735,6 +7715,34 @@ impl ScriptRuntime {
             args[3]
         );
         ExtCallOutcome::Value(1)
+    }
+
+    /// Native save labels use the `save_set_font_size` value unchanged; the
+    /// fallback only covers scripts that never set it.
+    fn save_font_size(&self) -> i32 {
+        if self.save_state.font_size > 0 { self.save_state.font_size.min(256) } else { 16 }
+    }
+
+    /// Native 0x42F420 saves the text font, applies the save label block,
+    /// draws, then restores size, type, effect and colors.
+    fn with_save_font<T>(&mut self, draw: impl FnOnce(&PalFontSystem) -> T) -> T {
+        let saved = (
+            self.font_state.font_size(),
+            self.font_state.font_type(),
+            self.font_state.effect(),
+            self.font_state.color(),
+        );
+        self.font_state.set_font_size(self.save_font_size() as u16);
+        let [color, effect_color] = self.save_state.font_colors;
+        self.font_state.set_type_word(self.save_state.font_type);
+        self.font_state.set_effect(self.save_state.font_effect as u16);
+        self.font_state.set_color(color as u32, effect_color as u32);
+        let result = draw(&self.font_state);
+        self.font_state.set_font_size(saved.0);
+        self.font_state.set_type_word(i32::from(saved.1));
+        self.font_state.set_effect(saved.2);
+        self.font_state.set_color(saved.3 .0, saved.3 .1);
+        result
     }
 
     fn place_save_label(
@@ -7749,11 +7757,7 @@ impl ScriptRuntime {
         let Some(sprites) = sprites else {
             return;
         };
-        let saved_size = self.font_state.font_size();
-        self.font_state
-            .set_font_size(self.save_state.font_size.max(16) as u16);
-        let (width, height, rgba) = self.font_state.rasterize(text);
-        self.font_state.set_font_size(saved_size);
+        let (width, height, rgba) = self.with_save_font(|font| font.rasterize(text));
         let priority = self.save_drawing_priority(sprites, sprite_slot);
         if let Some(handle) = self
             .save_state
@@ -17396,6 +17400,57 @@ fn unix_local_date_time(secs: i64) -> Option<LocalDateTime> {
     }
 }
 
+/// Native save text layout (trenka.exe 0x431C30): full-width characters
+/// advance by the font size, others by their measured width; after a glyph,
+/// a line breaks when another glyph of the same width would pass
+/// `width_limit`, and output stops once the next line (font size + 2) would
+/// pass `height_limit`. `<...>` tags are dropped. Non-positive limits leave
+/// the text unwrapped.
+fn wrap_save_title(
+    text: &str,
+    font_size: i32,
+    width_limit: i32,
+    height_limit: i32,
+    mut narrow_width: impl FnMut(char) -> i32,
+) -> String {
+    if width_limit <= 0 || height_limit <= 0 {
+        return text.to_owned();
+    }
+    let line_height = font_size.saturating_add(2);
+    let (mut x, mut y) = (0_i32, 0_i32);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            for skipped in chars.by_ref() {
+                if skipped == '>' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let advance = if ch.is_ascii() || ('\u{FF61}'..='\u{FF9F}').contains(&ch) {
+            narrow_width(ch)
+        } else {
+            font_size
+        };
+        out.push(ch);
+        x = x.saturating_add(advance);
+        if x.saturating_add(advance) > width_limit {
+            x = 0;
+            y = y.saturating_add(line_height);
+            if y.saturating_add(line_height) > height_limit {
+                break;
+            }
+            out.push('\n');
+        }
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn format_save_time(modified: SystemTime, format_mode: i32) -> String {
     let local = local_date_time(modified);
     let hour = local.hour;
@@ -19074,6 +19129,17 @@ mod tests {
             assert_eq!(vm.pc, 16);
             assert_eq!(vm.stack, [777]);
         }
+    }
+
+    #[test]
+    fn save_title_wraps_and_truncates_like_the_native_label() {
+        let narrow = |_| 8;
+        assert_eq!(wrap_save_title("abc", 16, 0, 0, narrow), "abc");
+        // Full-width glyphs advance by the font size (16): 4 fit in 70.
+        assert_eq!(wrap_save_title("あいうえおかきく", 16, 70, 100, narrow), "あいうえ\nおかきく");
+        // A third line would pass the height limit (36 + 18 > 40).
+        assert_eq!(wrap_save_title("あいうえおかきくけこ", 16, 40, 40, narrow), "あい\nうえ");
+        assert_eq!(wrap_save_title("a<tag>b", 16, 1000, 100, narrow), "ab");
     }
 
     #[test]
