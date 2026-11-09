@@ -22,6 +22,7 @@ impl ScriptRuntime {
         let root = resource_manager.map(|manager| manager.root().to_path_buf());
         Some(match (category, index) {
             (2, 35) => self.ext_get_current_text(assets, nls),
+            (18, 3) => self.ext_string_contains_ignore_case(assets, nls),
             // 0x425D70 sp_load_wait_time and 0x425C90 sp_draw pop a slot or
             // duration; portable sprites load synchronously and draw every
             // frame.
@@ -226,6 +227,24 @@ impl ScriptRuntime {
     }
 
     /// 0x41E8E0: 1 when two strings differ after ASCII upper-casing.
+    /// 0x41B050 pops a haystack and then a needle, resolves both through
+    /// 0x44B500 (dynamic string, else a File.dat entry), upper-cases them and
+    /// returns whether `strstr` finds the needle. The stand-sprite helpers use
+    /// it to map a sprite file id to its character (point 311). Game.exe's
+    /// 18:3 is a plain inequality test instead.
+    fn ext_string_contains_ignore_case(&mut self, assets: &CoreAssets, nls: Nls) -> ExtCallOutcome {
+        let args = self.pop_ext_args(2);
+        let [haystack, needle] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        let text = |value| {
+            self.resolve_resource_string(value, assets, nls)
+                .unwrap_or_default()
+                .to_ascii_uppercase()
+        };
+        ExtCallOutcome::Value(i32::from(text(haystack).contains(&text(needle))))
+    }
+
     fn ext_strings_differ_ignore_case(&mut self, assets: &CoreAssets, nls: Nls) -> ExtCallOutcome {
         let args = self.pop_ext_args(2);
         let [first, second] = args[..] else {
@@ -305,4 +324,27 @@ pub(super) struct ChannelFade {
     to: i32,
     start_ms: u32,
     duration_ms: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::empty_core_assets;
+    use super::*;
+    use crate::assets::NativeBuild;
+
+    #[test]
+    fn string_test_is_a_case_insensitive_substring_search() {
+        let (mut assets, _) = empty_core_assets(false);
+        assets.native_build = NativeBuild::Trenka;
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.dynamic_strings = vec!["st02a_a080.pgd".into(), "ST02".into(), "ST07".into()];
+        let handle = |index: i32| 0x1000_0000 | index;
+        // Needle pushed first, haystack on top.
+        for (needle, expected) in [(1, 1), (2, 0)] {
+            vm.stack = vec![handle(needle), handle(0)];
+            let outcome = vm.dispatch_trenka_wrapper(18, 3, &assets, Nls::ShiftJis, None, None);
+            assert!(matches!(outcome, Some(ExtCallOutcome::Value(v)) if v == expected));
+            assert!(vm.stack.is_empty());
+        }
+    }
 }

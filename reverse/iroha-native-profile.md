@@ -94,7 +94,7 @@ present slot does not mean Sena implements the handler's semantics.
   9:55 `get_font_color` pops a selector (all builds), 10:29 swaps two save
   slots through `save_tmp.dat`, 18:17 pops nothing. With the small
   wrappers in `runtime/trenka_wrappers.rs` (2:35, 3:42/43, 4:5, 4:16/17,
-  8:28/30, 15:1/8/9, 18:43..48, 18:76, 18:109, 18:113..115) and 8:42 shared
+  8:28/30, 15:1/8/9, 18:3, 18:43..48, 18:76, 18:109, 18:113..115) and 8:42 shared
   with the registered builds, every one of the 419 extcall coordinates the
   script uses pops what the native wrapper pops (18:9 wsprint pops its
   padded operands in a loop; 11:2 pops through sp_cls).
@@ -139,6 +139,13 @@ present slot does not mean Sena implements the handler's semantics.
 - `sp_set_pos_move` (0x428F20) resolves its slot through 0x449110, which
   maps packed button references to the button sprite, and adds the delta
   to the wrapper base position.
+- 18:3 (0x41B050) differs from Game.exe: it pops a haystack and then a
+  needle, resolves both through 0x44B500 (dynamic string, else the
+  File.dat entry `index * 32 + 0x10`), upper-cases them and returns whether
+  `strstr` finds the needle. Point 311 uses it to map a stand-sprite file
+  id to its character (`ST09A_A270` contains `ST09`); point 320 then reads
+  the character's slot from `mem_user[190 + character]`, and the
+  expression change (point 393) transitions that slot.
 - 15:8 (0x411B50) writes the VM stack depth to its destination and pops
   nothing; the menu thread prints it in its debug traces.
 
@@ -201,6 +208,12 @@ present slot does not mean Sena implements the handler's semantics.
 - A 2,300,000-frame auto-advance route spends 14,137 frames in the battle
   region without an unimplemented call; captures show the view change,
   speed-line cut-ins, slash sprites and character slides.
+- Expression changes: with Game.exe's inequality semantics for 18:3 every
+  file matched character 0, so changes went to the wrong slot and left
+  the old sprite on screen (two copies of one character, plus "no current
+  image" warnings). With the trenka wrapper a 450,000-frame route logs no
+  "no current image" warning (nine before) and the scene at script
+  0x195FB0 shows a single sprite that changes expression.
 - ADV menu (headless, mouse moved by injected clicks): with the pointer
   outside the zone only the `>>` tab shows; moving it onto the panel slides
   in all buttons in their slots (BACK/NEXT, SAVE/LOAD, Q.SAVE/Q.LOAD,

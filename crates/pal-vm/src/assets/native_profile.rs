@@ -50,7 +50,7 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 /// - 3:58 `drawtext` (0x42A3F0): wrapped text into an existing sprite.
 /// - 10:29 (0x4317C0): swap two save slots through `save_tmp.dat`.
 /// - Small wrappers in `runtime/trenka_wrappers.rs`: 2:35, 3:42, 3:43, 4:5,
-///   4:16, 4:17, 8:28, 8:30, 9:48, 15:1, 15:8, 15:9, 18:17, 18:43..48, 18:76,
+///   4:16, 4:17, 8:28, 8:30, 9:48, 15:1, 15:8, 15:9, 18:3, 18:17, 18:43..48, 18:76,
 ///   18:90, 18:92, 18:109, 18:113..115.
 /// - 8:27 `btn_blt` (0x40FEA0), 8:31/8:32 button tips word (0x410610/0x410720).
 /// - 14:25 (0x42D1A0): per-record backlog separator sprite.
@@ -74,6 +74,7 @@ const TRENKA_OWN_EXTCALLS: &[(u16, u16, u16)] = &[
     (14, 25, 25),
     (15, 1, 1),
     (15, 8, 9),
+    (18, 3, 3),
     (18, 17, 17),
     (18, 43, 48),
     (18, 50, 50),
