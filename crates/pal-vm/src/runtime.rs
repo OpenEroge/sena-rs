@@ -15429,9 +15429,22 @@ impl ScriptRuntime {
                 formatted.push('%');
                 break;
             };
-            if spec == '%' {
-                formatted.push('%');
-                continue;
+            // Argument-free escapes of the native formatter (trenka 0x41A5F4):
+            // `%%`, `%'` (double quote) and `%n` (CR LF).
+            match spec {
+                '%' => {
+                    formatted.push('%');
+                    continue;
+                }
+                '\'' => {
+                    formatted.push('"');
+                    continue;
+                }
+                'n' => {
+                    formatted.push_str("\r\n");
+                    continue;
+                }
+                _ => {}
             }
             let value = args.get(value_index).copied().unwrap_or_default();
             value_index = value_index.saturating_add(1);
@@ -15447,7 +15460,8 @@ impl ScriptRuntime {
                 value
             };
             match spec {
-                's' | 'S' | 'f' | 'F' => {
+                // `%t`/`%T` resolve a script string exactly like `%s`.
+                's' | 'S' | 't' | 'T' | 'f' | 'F' => {
                     let text = self
                         .resolve_script_string(value, assets, nls)
                         .or_else(|| self.resolve_resource_string(value, assets, nls))
@@ -19092,6 +19106,21 @@ mod tests {
         assert_eq!(call(&mut vm, 4, 16, vec![9, -1]), (ExtCallOutcome::Value(-1), 1));
         let dst = [0; 3].map(|_| vm.store_dynamic_string(String::new()));
         assert_eq!(call(&mut vm, 2, 35, vec![9, dst[2], dst[1], dst[0]]), (ExtCallOutcome::Value(1), 1));
+    }
+
+    #[test]
+    fn wsprint_expands_text_and_escape_specifiers() {
+        let (assets, points) = empty_core_assets(false);
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let dst = vm.store_dynamic_string(String::new());
+        let format = vm.store_dynamic_string("[%t]%n%'%%".to_owned());
+        let title = vm.store_dynamic_string("曲".to_owned());
+        let mut stack = vec![0x0FFF_FFFF; 7];
+        stack.extend([title, format, dst]);
+        vm.stack = stack;
+        vm.dispatch_extcall(18, 9, &[], &assets, &points, None, None, None, None, None);
+        assert!(vm.stack.is_empty());
+        assert_eq!(vm.dynamic_strings[dynamic_string_index(dst).unwrap()], "[曲]\r\n\"%");
     }
 
     #[test]
