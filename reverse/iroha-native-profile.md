@@ -49,6 +49,20 @@ present slot does not mean Sena implements the handler's semantics.
   script sets it afterwards but only four sites call `savesystemdata`
   (10:25), so persistence depends on reaching one of them.
 
+- Wrappers matching the registered contract (pop count, debug strings,
+  PAL calls): 2:47, 3:59, 5:0..14, 9:57, 10:37..39, 14:13..19, 14:21..24,
+  18:54, 18:88/89/91, 18:96..99. 18:90 differs (no operands).
+- `.ani` programs: loader 0x4473E0, interpreter 0x4466A0, driver
+  0x446FE0/0x447060, clear 0x447180, tasks 0x402FF0..0x404440.
+- Action section types 16 (rect tween, 17:31) and 20 (mask reveal,
+  17:35); per-type callback tables at 0x625EE8/0x625F40/0x625FA0/0x626000.
+- 3:14 writes the wrapper position layer (+0x10..0x18), not rotation.
+- Save labels (10:13/10:16/10:6) apply the save font block via 0x42F420 and
+  wrap to the 10:15 rect (0x431C30).
+- Category 18 extras: dictionary 82..87, save folder 50, append 59, global
+  words 72/73/79, scene-skip query 108. INI wrappers resolve the file name
+  through File.dat (0x44B500).
+
 ## Implementation state
 
 - The VM always decodes the gosub target as an operand; previously only the
@@ -60,6 +74,10 @@ present slot does not mean Sena implements the handler's semantics.
 - `sp_get_filename` strips the one loader suffix from the asset name.
 - 5:2 follows the native operand order (flags, fade, group selector) with
   the default channel volume; 5:1 is unchanged.
+- `NativeBuild::Trenka` (complete-file digests) selects the shared
+  registered coordinates, the position layer for 3:14 and the category 18
+  extras; `registered_softpal` stays off.
+- `ani.rs` runs the full motion bytecode into `PalSprite::motion_lanes`.
 - `--diagnostic-realtime` paces headless frames to the wall clock. Without
   it device audio lags the VM clock and the click-sound gate on button
   reactions never clears.
