@@ -7925,7 +7925,12 @@ impl ScriptRuntime {
         mut audio: Option<&mut AudioSystem>,
         input: Option<&PalInputState>,
     ) -> ExtCallOutcome {
-        if matches!(index, 13..=19 | 21..=24) && assets.registered_extcall(14, index) {
+        let icon_wrapper = match index {
+            13..=19 | 21..=24 => assets.registered_extcall(14, index),
+            25 => assets.native_build.history_separator_line(),
+            _ => false,
+        };
+        if icon_wrapper {
             return self.dispatch_history_icons(index, assets, nls, resource_manager, audio);
         }
         match index {

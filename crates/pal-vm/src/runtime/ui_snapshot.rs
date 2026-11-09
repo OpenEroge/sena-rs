@@ -33,7 +33,13 @@ impl ScriptRuntime {
             self.system_button_blocked_at =
                 (saved.invalid_remaining_ms != 0).then_some(self.pal_time_ms);
             self.button_children = saved.children.clone();
-            self.history_state.icons.config = saved.config.clone();
+            let current = &self.history_state.icons.config;
+            self.history_state.icons.config = history_icons::IconConfig {
+                separator_enabled: current.separator_enabled,
+                separator_name: current.separator_name.clone(),
+                separator_position: current.separator_position,
+                ..saved.config.clone()
+            };
             self.history_state.icons.records = saved.records.clone();
             self.history_state.icons.current_checkpoint = saved.current_checkpoint;
             self.restore_history_counter(saved.current_checkpoint);
@@ -144,6 +150,8 @@ pub(super) fn read(reader: &mut impl Read) -> std::io::Result<Option<SavedUi>> {
         voice_icon_enabled: words[13] != 0,
         secondary_name: name()?,
         voice_icon_name: name()?,
+        // Not part of the save image: the separator line is boot config.
+        ..Default::default()
     };
     saved.current_checkpoint = read_i32_from(reader)?;
     let count = read_u32_from(reader)?;

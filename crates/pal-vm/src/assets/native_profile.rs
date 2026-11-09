@@ -53,6 +53,11 @@ impl NativeBuild {
         self == NativeBuild::Trenka
     }
 
+    /// trenka.exe adds 14:25, a per-record separator sprite in the backlog.
+    pub fn history_separator_line(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
     /// Whether this build's wrapper at `category:index` follows the
     /// registered contract independently of the DLL capability markers.
     pub fn shares_registered_extcall(self, category: u16, index: u16) -> bool {
@@ -324,7 +329,12 @@ mod tests {
         assert!(NativeBuild::Trenka.shares_registered_extcall(18, 97));
         assert!(!NativeBuild::Trenka.shares_registered_extcall(18, 90));
         assert!(!NativeBuild::Trenka.shares_registered_extcall(5, 15));
-        for build in [NativeBuild::Unknown, NativeBuild::Koikake, NativeBuild::Reference, NativeBuild::Totsulover] {
+        for build in [
+            NativeBuild::Unknown,
+            NativeBuild::Koikake,
+            NativeBuild::Reference,
+            NativeBuild::Totsulover,
+        ] {
             assert!(!build.shares_registered_extcall(5, 1));
         }
     }

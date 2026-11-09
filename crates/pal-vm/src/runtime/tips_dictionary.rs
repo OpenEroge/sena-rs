@@ -41,7 +41,9 @@ pub(super) struct TipsDictionary {
 /// Map a script path below the reported save folder to the real save
 /// directory. Absolute paths, parent components and other roots are refused.
 pub(super) fn save_folder_path(root: &Path, native: &str) -> Option<PathBuf> {
-    let mut parts = native.split(['\\', '/']).filter(|part| !part.is_empty() && *part != ".");
+    let mut parts = native
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty() && *part != ".");
     if !parts.next()?.eq_ignore_ascii_case(SAVE_FOLDER) {
         return None;
     }
@@ -80,15 +82,23 @@ fn csv_fields(text: &str) -> Vec<String> {
 }
 
 fn kana_row(reading: &str, nls: Nls) -> i32 {
-    let Some(first) = reading.chars().next() else { return -1; };
-    let Ok(needle) = nls.encode(first.encode_utf8(&mut [0; 4])) else { return -1; };
+    let Some(first) = reading.chars().next() else {
+        return -1;
+    };
+    let Ok(needle) = nls.encode(first.encode_utf8(&mut [0; 4])) else {
+        return -1;
+    };
     if needle.is_empty() {
         return -1;
     }
     KANA_ROWS
         .iter()
         .filter_map(|row| nls.encode(row).ok())
-        .find_map(|table| table.windows(needle.len()).position(|window| window == needle.as_slice()))
+        .find_map(|table| {
+            table
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+        })
         .map_or(-1, |offset| (offset / 10) as i32)
 }
 
@@ -98,13 +108,21 @@ impl TipsDictionary {
         let entries: Vec<TipsEntry> = fields
             .chunks_exact(4)
             .map(|chunk| TipsEntry {
-                fields: [chunk[0].clone(), chunk[1].clone(), chunk[2].clone(), chunk[3].clone()],
+                fields: [
+                    chunk[0].clone(),
+                    chunk[1].clone(),
+                    chunk[2].clone(),
+                    chunk[3].clone(),
+                ],
                 row: kana_row(&chunk[1], nls),
                 flags: [0; 2],
             })
             .collect();
         // Native rejects the whole table when a reading is empty.
-        entries.iter().all(|entry| !entry.fields[1].is_empty()).then_some(entries)
+        entries
+            .iter()
+            .all(|entry| !entry.fields[1].is_empty())
+            .then_some(entries)
     }
 
     fn apply_flags(&mut self, bytes: &[u8]) {
@@ -143,7 +161,9 @@ impl ScriptRuntime {
                 let _ = self.ext_string_append(assets, nls);
                 ExtCallOutcome::Continue
             }
-            60..=68 | 72 | 73 | 79 => self.dispatch_voice_favorites(index, assets, nls, resource_manager),
+            60..=68 | 72 | 73 | 79 => {
+                self.dispatch_voice_favorites(index, assets, nls, resource_manager)
+            }
             // 0x41E8C0 reads the scene-skip latch that 9:51/9:52 set and clear.
             108 => ExtCallOutcome::Value(i32::from(self.scene_skip_active)),
             82 => self.ext_tips_read(assets, nls, resource_manager),
@@ -158,7 +178,9 @@ impl ScriptRuntime {
     /// 0x419F40: copy the save folder into a string slot and return 1.
     fn ext_get_save_folder(&mut self) -> ExtCallOutcome {
         let args = self.pop_ext_args(1);
-        let Some(&dst) = args.first() else { return ExtCallOutcome::Block; };
+        let Some(&dst) = args.first() else {
+            return ExtCallOutcome::Block;
+        };
         if is_dynamic_string_handle(dst) {
             self.replace_dynamic_string(dst, SAVE_FOLDER.to_owned());
             ExtCallOutcome::Value(1)
@@ -176,12 +198,22 @@ impl ScriptRuntime {
         resource_manager: Option<&mut ResourceManager>,
     ) -> ExtCallOutcome {
         let args = self.pop_ext_args(2);
-        let [csv, path] = args[..] else { return ExtCallOutcome::Block; };
-        self.tips_dictionary.flag_path = self.resolve_script_string(path, assets, nls).unwrap_or_default();
+        let [csv, path] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        self.tips_dictionary.flag_path = self
+            .resolve_script_string(path, assets, nls)
+            .unwrap_or_default();
         self.tips_dictionary.entries.clear();
-        let Some(manager) = resource_manager else { return ExtCallOutcome::Value(0); };
-        let Some(name) = self.resolve_resource_string(csv, assets, nls) else { return ExtCallOutcome::Value(0); };
-        let text = match manager.open(&name).map_err(anyhow::Error::from)
+        let Some(manager) = resource_manager else {
+            return ExtCallOutcome::Value(0);
+        };
+        let Some(name) = self.resolve_resource_string(csv, assets, nls) else {
+            return ExtCallOutcome::Value(0);
+        };
+        let text = match manager
+            .open(&name)
+            .map_err(anyhow::Error::from)
             .and_then(|asset| Ok(manager.nls().decode(&asset.bytes)?))
         {
             Ok(text) => text,
@@ -199,7 +231,10 @@ impl ScriptRuntime {
         if let Some(bytes) = flag_file.and_then(|path| std::fs::read(path).ok()) {
             self.tips_dictionary.apply_flags(&bytes);
         }
-        log::debug!("[trace-tips] tips_csv_read {name:?} entries={}", self.tips_dictionary.entries.len());
+        log::debug!(
+            "[trace-tips] tips_csv_read {name:?} entries={}",
+            self.tips_dictionary.entries.len()
+        );
         ExtCallOutcome::Value(self.tips_dictionary.entries.len() as i32)
     }
 
@@ -208,8 +243,13 @@ impl ScriptRuntime {
     /// fields 4, 5 and 6 return the kana row and the two flags.
     fn ext_tips_get(&mut self) -> ExtCallOutcome {
         let args = self.pop_ext_args(3);
-        let [index, field, dst] = args[..] else { return ExtCallOutcome::Block; };
-        let Some(entry) = usize::try_from(index).ok().and_then(|index| self.tips_dictionary.entries.get(index)) else {
+        let [index, field, dst] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        let Some(entry) = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.tips_dictionary.entries.get(index))
+        else {
             log::debug!("[trace-tips] tips_csv_get error index={index} field={field}");
             return ExtCallOutcome::Value(-1);
         };
@@ -233,9 +273,17 @@ impl ScriptRuntime {
     /// 0x41C320: exact name match; -1 when absent.
     fn ext_tips_search(&mut self, assets: &CoreAssets, nls: Nls) -> ExtCallOutcome {
         let args = self.pop_ext_args(1);
-        let Some(&value) = args.first() else { return ExtCallOutcome::Block; };
-        let name = self.resolve_script_string(value, assets, nls).unwrap_or_default();
-        let found = self.tips_dictionary.entries.iter().position(|entry| entry.fields[0] == name);
+        let Some(&value) = args.first() else {
+            return ExtCallOutcome::Block;
+        };
+        let name = self
+            .resolve_script_string(value, assets, nls)
+            .unwrap_or_default();
+        let found = self
+            .tips_dictionary
+            .entries
+            .iter()
+            .position(|entry| entry.fields[0] == name);
         if found.is_none() {
             log::debug!("[trace-tips] tips_csv_search not found {name:?}");
         }
@@ -246,8 +294,13 @@ impl ScriptRuntime {
     /// first flag, 1 and 6 the second; the slot always receives 0.
     fn ext_tips_set_flag(&mut self) -> ExtCallOutcome {
         let args = self.pop_ext_args(3);
-        let [index, selector, value] = args[..] else { return ExtCallOutcome::Block; };
-        if let Some(entry) = usize::try_from(index).ok().and_then(|index| self.tips_dictionary.entries.get_mut(index)) {
+        let [index, selector, value] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        if let Some(entry) = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.tips_dictionary.entries.get_mut(index))
+        {
             match selector {
                 0 | 5 => entry.flags[0] = value as u8,
                 1 | 6 => entry.flags[1] = value as u8,
@@ -258,17 +311,29 @@ impl ScriptRuntime {
     }
 
     /// 0x41D790: write the flags to the file chosen by 18:82.
-    fn ext_tips_save_flags(&mut self, resource_manager: Option<&ResourceManager>) -> ExtCallOutcome {
+    fn ext_tips_save_flags(
+        &mut self,
+        resource_manager: Option<&ResourceManager>,
+    ) -> ExtCallOutcome {
         let Some(path) = resource_manager
             .and_then(|manager| save_folder_path(manager.root(), &self.tips_dictionary.flag_path))
         else {
-            log::debug!("[trace-tips] tips_acc_save has no writable path {:?}", self.tips_dictionary.flag_path);
+            log::debug!(
+                "[trace-tips] tips_acc_save has no writable path {:?}",
+                self.tips_dictionary.flag_path
+            );
             return ExtCallOutcome::Continue;
         };
         let bytes = self.tips_dictionary.encode_flags();
-        let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, bytes));
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&path, bytes));
         if let Err(error) = result {
-            log::warn!("[trace-tips] tips_acc_save {} failed: {error}", path.display());
+            log::warn!(
+                "[trace-tips] tips_acc_save {} failed: {error}",
+                path.display()
+            );
         }
         ExtCallOutcome::Continue
     }
@@ -282,8 +347,14 @@ mod tests {
     fn save_folder_paths_stay_inside_the_save_directory() {
         let root = Path::new("/game");
         let save = pal_asset::vfs::save_directory(root);
-        assert_eq!(save_folder_path(root, "save\\\\tips.dat"), Some(save.join("tips.dat")));
-        assert_eq!(save_folder_path(root, "SAVE/a/b.dat"), Some(save.join("a").join("b.dat")));
+        assert_eq!(
+            save_folder_path(root, "save\\\\tips.dat"),
+            Some(save.join("tips.dat"))
+        );
+        assert_eq!(
+            save_folder_path(root, "SAVE/a/b.dat"),
+            Some(save.join("a").join("b.dat"))
+        );
         assert_eq!(save_folder_path(root, "save"), None);
         assert_eq!(save_folder_path(root, "save\\..\\x"), None);
         assert_eq!(save_folder_path(root, "C:\\save\\x"), None);
@@ -297,7 +368,10 @@ mod tests {
             entries: TipsDictionary::parse(text, Nls::ShiftJis).unwrap(),
             ..Default::default()
         };
-        assert_eq!(dictionary.entries[0].fields, ["A", "か", "s1", "b1"].map(String::from));
+        assert_eq!(
+            dictionary.entries[0].fields,
+            ["A", "か", "s1", "b1"].map(String::from)
+        );
         assert_eq!(dictionary.entries[0].row, 1);
         assert_eq!(dictionary.entries[1].row, 9);
         dictionary.apply_flags(b"1001");

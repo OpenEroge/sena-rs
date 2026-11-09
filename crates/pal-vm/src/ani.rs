@@ -31,7 +31,9 @@ impl std::fmt::Display for AniError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Truncated => write!(f, "motion program is shorter than its trailer"),
-            Self::EntryOutOfRange(entry) => write!(f, "motion program entry {entry} is out of range"),
+            Self::EntryOutOfRange(entry) => {
+                write!(f, "motion program entry {entry} is out of range")
+            }
         }
     }
 }
@@ -46,12 +48,19 @@ pub struct AniProgram {
 
 impl AniProgram {
     pub fn parse(bytes: &[u8]) -> Result<Self, AniError> {
-        let code_len = bytes.len().checked_sub(4).filter(|len| *len > 0).ok_or(AniError::Truncated)?;
+        let code_len = bytes
+            .len()
+            .checked_sub(4)
+            .filter(|len| *len > 0)
+            .ok_or(AniError::Truncated)?;
         let entry = i32::from_le_bytes(bytes[code_len..].try_into().unwrap());
         if entry < 0 || entry as usize >= code_len {
             return Err(AniError::EntryOutOfRange(entry));
         }
-        Ok(Self { bytes: bytes.into(), entry: entry as u32 })
+        Ok(Self {
+            bytes: bytes.into(),
+            entry: entry as u32,
+        })
     }
 
     fn code_len(&self) -> usize {
@@ -59,7 +68,11 @@ impl AniProgram {
     }
 
     fn opcode(&self, pc: u32) -> Option<u8> {
-        if (pc as usize) < self.code_len() { self.bytes.get(pc as usize).copied() } else { None }
+        if (pc as usize) < self.code_len() {
+            self.bytes.get(pc as usize).copied()
+        } else {
+            None
+        }
     }
 
     fn operands<const N: usize>(&self, pc: u32) -> Option<[i32; N]> {
@@ -137,13 +150,44 @@ pub struct AniContext<'a> {
 
 #[derive(Clone, Debug)]
 enum Task {
-    Wait { start: u32, duration: Option<u32> },
-    Move { mode: i32, delta: [i32; 3], start: u32, duration: u32 },
-    Rotate { delta: [i32; 3], start: u32, duration: u32 },
-    Scale { delta: i32, start: u32, duration: u32 },
-    Alpha { delta: i32, start: u32, duration: u32 },
-    Toward { target: [i32; 2], step: [f32; 2], current: [f32; 2], interval: u32, last: u32 },
-    Wave { params: [i32; 8], start: u32, duration: u32, commit: bool },
+    Wait {
+        start: u32,
+        duration: Option<u32>,
+    },
+    Move {
+        mode: i32,
+        delta: [i32; 3],
+        start: u32,
+        duration: u32,
+    },
+    Rotate {
+        delta: [i32; 3],
+        start: u32,
+        duration: u32,
+    },
+    Scale {
+        delta: i32,
+        start: u32,
+        duration: u32,
+    },
+    Alpha {
+        delta: i32,
+        start: u32,
+        duration: u32,
+    },
+    Toward {
+        target: [i32; 2],
+        step: [f32; 2],
+        current: [f32; 2],
+        interval: u32,
+        last: u32,
+    },
+    Wave {
+        params: [i32; 8],
+        start: u32,
+        duration: u32,
+        commit: bool,
+    },
 }
 
 fn progress(now: u32, start: u32, duration: u32) -> (u32, f32) {
@@ -178,13 +222,24 @@ fn wave_offset(params: &[i32; 8], factor: f32) -> [i32; 2] {
     let amp_x = params[2].wrapping_add(scaled(params[6], factor));
     let phase_x = params[0].wrapping_add(scaled(params[4], factor));
     let amp_y = params[3].wrapping_add(scaled(params[7], factor));
-    let phase_y = scaled(params[5], factor).wrapping_add(params[1]).wrapping_add(0x80);
-    [(amp_x as f32 * sine(phase_x)) as i32, (amp_y as f32 * sine(phase_y)) as i32]
+    let phase_y = scaled(params[5], factor)
+        .wrapping_add(params[1])
+        .wrapping_add(0x80);
+    [
+        (amp_x as f32 * sine(phase_x)) as i32,
+        (amp_y as f32 * sine(phase_y)) as i32,
+    ]
 }
 
 impl Task {
     /// Advance one frame. Returns false once the task is finished.
-    fn update(&mut self, now: u32, waiting: &mut bool, committed: &mut MotionDelta, transient: &mut MotionDelta) -> bool {
+    fn update(
+        &mut self,
+        now: u32,
+        waiting: &mut bool,
+        committed: &mut MotionDelta,
+        transient: &mut MotionDelta,
+    ) -> bool {
         match self {
             Self::Wait { start, duration } => {
                 let done = duration.is_some_and(|duration| now.wrapping_sub(*start) >= duration);
@@ -193,41 +248,84 @@ impl Task {
                 }
                 !done
             }
-            Self::Move { mode, delta, start, duration } => {
+            Self::Move {
+                mode,
+                delta,
+                start,
+                duration,
+            } => {
                 let elapsed = now.wrapping_sub(*start).min(*duration);
                 let factor = ease(*mode, elapsed, *duration);
-                let target = if elapsed >= *duration { committed } else { transient };
+                let target = if elapsed >= *duration {
+                    committed
+                } else {
+                    transient
+                };
                 for axis in 0..3 {
-                    target.position[axis] = target.position[axis].wrapping_add(scaled(delta[axis], factor));
+                    target.position[axis] =
+                        target.position[axis].wrapping_add(scaled(delta[axis], factor));
                 }
                 elapsed < *duration
             }
-            Self::Rotate { delta, start, duration } => {
+            Self::Rotate {
+                delta,
+                start,
+                duration,
+            } => {
                 let (elapsed, factor) = progress(now, *start, *duration);
-                let target = if elapsed >= *duration { committed } else { transient };
+                let target = if elapsed >= *duration {
+                    committed
+                } else {
+                    transient
+                };
                 for axis in 0..3 {
-                    target.rotation[axis] = target.rotation[axis].wrapping_add(scaled(delta[axis], factor));
+                    target.rotation[axis] =
+                        target.rotation[axis].wrapping_add(scaled(delta[axis], factor));
                 }
                 elapsed < *duration
             }
-            Self::Scale { delta, start, duration } => {
+            Self::Scale {
+                delta,
+                start,
+                duration,
+            } => {
                 let (elapsed, factor) = progress(now, *start, *duration);
-                let target = if elapsed >= *duration { committed } else { transient };
+                let target = if elapsed >= *duration {
+                    committed
+                } else {
+                    transient
+                };
                 target.scale += factor * *delta as f32 / 100.0;
                 elapsed < *duration
             }
-            Self::Alpha { delta, start, duration } => {
+            Self::Alpha {
+                delta,
+                start,
+                duration,
+            } => {
                 let (elapsed, factor) = progress(now, *start, *duration);
-                let target = if elapsed >= *duration { committed } else { transient };
+                let target = if elapsed >= *duration {
+                    committed
+                } else {
+                    transient
+                };
                 target.color[0] = target.color[0].wrapping_add(scaled(*delta, factor) as i16);
                 elapsed < *duration
             }
-            Self::Toward { target, step, current, interval, last } => {
+            Self::Toward {
+                target,
+                step,
+                current,
+                interval,
+                last,
+            } => {
                 if now.wrapping_sub(*last) >= *interval {
                     *last = now;
                     current[0] += step[0];
                     current[1] += step[1];
-                    if (current[0] + 0.5) as i32 == target[0] && (current[1] + 0.5) as i32 == target[1] {
+                    if (current[0] + 0.5) as i32 == target[0]
+                        && (current[1] + 0.5) as i32 == target[1]
+                    {
                         committed.position[0] = committed.position[0].wrapping_add(target[0]);
                         committed.position[1] = committed.position[1].wrapping_add(target[1]);
                         return false;
@@ -237,10 +335,19 @@ impl Task {
                 transient.position[1] = transient.position[1].wrapping_add(current[1] as i32);
                 true
             }
-            Self::Wave { params, start, duration, commit } => {
+            Self::Wave {
+                params,
+                start,
+                duration,
+                commit,
+            } => {
                 let (elapsed, factor) = progress(now, *start, *duration);
                 let [x, y] = wave_offset(params, factor.min(1.0));
-                let target = if elapsed >= *duration && *commit { committed } else { transient };
+                let target = if elapsed >= *duration && *commit {
+                    committed
+                } else {
+                    transient
+                };
                 target.position[0] = target.position[0].wrapping_add(x);
                 target.position[1] = target.position[1].wrapping_add(y);
                 elapsed < *duration
@@ -263,7 +370,9 @@ impl Task {
                 }
             }
             Self::Scale { delta, .. } => committed.scale += *delta as f32 / 100.0,
-            Self::Alpha { delta, .. } => committed.color[0] = committed.color[0].wrapping_add(*delta as i16),
+            Self::Alpha { delta, .. } => {
+                committed.color[0] = committed.color[0].wrapping_add(*delta as i16)
+            }
             Self::Toward { target, .. } => {
                 committed.position[0] = committed.position[0].wrapping_add(target[0]);
                 committed.position[1] = committed.position[1].wrapping_add(target[1]);
@@ -297,7 +406,13 @@ enum RunResult {
 
 impl AniThread {
     fn new(pc: u32) -> Self {
-        Self { pc, prologue: false, waiting: false, persist: false, tasks: Vec::new() }
+        Self {
+            pc,
+            prologue: false,
+            waiting: false,
+            persist: false,
+            tasks: Vec::new(),
+        }
     }
 
     fn finish_tasks(&mut self, committed: &mut MotionDelta) {
@@ -309,7 +424,8 @@ impl AniThread {
 
     fn tick(&mut self, now: u32, committed: &mut MotionDelta, transient: &mut MotionDelta) {
         let mut waiting = self.waiting;
-        self.tasks.retain_mut(|task| task.update(now, &mut waiting, committed, transient));
+        self.tasks
+            .retain_mut(|task| task.update(now, &mut waiting, committed, transient));
         self.waiting = waiting;
     }
 
@@ -321,13 +437,17 @@ impl AniThread {
         children: &mut [Option<AniThread>; CHILD_SLOTS],
     ) -> RunResult {
         for _ in 0..INSTRUCTION_BUDGET {
-            let Some(op) = program.opcode(self.pc) else { return RunResult::End; };
+            let Some(op) = program.opcode(self.pc) else {
+                return RunResult::End;
+            };
             let pc = self.pc + 1;
             self.pc = pc;
             let now = ctx.now_ms;
             macro_rules! args {
                 ($n:literal) => {{
-                    let Some(args) = program.operands::<$n>(pc) else { return RunResult::End; };
+                    let Some(args) = program.operands::<$n>(pc) else {
+                        return RunResult::End;
+                    };
                     self.pc = pc + $n * 4;
                     args
                 }};
@@ -336,48 +456,88 @@ impl AniThread {
             match op {
                 0x00 | 0x0E | 0x0F | 0x12 => {
                     let [x, y, z, duration] = args!(4);
-                    let mode = match op { 0x0E => 1, 0x0F => 2, 0x12 => 4, _ => 0 };
-                    self.tasks.push(Task::Move { mode, delta: [x, y, z], start: now, duration: nonzero(duration) });
+                    let mode = match op {
+                        0x0E => 1,
+                        0x0F => 2,
+                        0x12 => 4,
+                        _ => 0,
+                    };
+                    self.tasks.push(Task::Move {
+                        mode,
+                        delta: [x, y, z],
+                        start: now,
+                        duration: nonzero(duration),
+                    });
                 }
                 0x11 => {
                     let [mode, x, y, z, duration] = args!(5);
                     let base = ctx.base_position;
-                    let delta = [x.wrapping_sub(base[0]), y.wrapping_sub(base[1]), z.wrapping_sub(base[2])];
-                    self.tasks.push(Task::Move { mode, delta, start: now, duration: nonzero(duration) });
+                    let delta = [
+                        x.wrapping_sub(base[0]),
+                        y.wrapping_sub(base[1]),
+                        z.wrapping_sub(base[2]),
+                    ];
+                    self.tasks.push(Task::Move {
+                        mode,
+                        delta,
+                        start: now,
+                        duration: nonzero(duration),
+                    });
                 }
                 0x01 => {
                     let [duration] = args!(1);
-                    self.tasks.push(Task::Wait { start: now, duration: (duration != -1).then_some(duration as u32) });
+                    self.tasks.push(Task::Wait {
+                        start: now,
+                        duration: (duration != -1).then_some(duration as u32),
+                    });
                     self.waiting = true;
                 }
                 0x02 => {
                     let [delta, duration] = args!(2);
-                    self.tasks.push(Task::Scale { delta, start: now, duration: nonzero(duration) });
+                    self.tasks.push(Task::Scale {
+                        delta,
+                        start: now,
+                        duration: nonzero(duration),
+                    });
                 }
                 0x03 => {
                     let [delta, duration] = args!(2);
-                    self.tasks.push(Task::Alpha { delta, start: now, duration: nonzero(duration) });
+                    self.tasks.push(Task::Alpha {
+                        delta,
+                        start: now,
+                        duration: nonzero(duration),
+                    });
                 }
                 0x04 => {
                     let [x, y, z, duration] = args!(4);
-                    self.tasks.push(Task::Rotate { delta: [x, y, z], start: now, duration: nonzero(duration) });
+                    self.tasks.push(Task::Rotate {
+                        delta: [x, y, z],
+                        start: now,
+                        duration: nonzero(duration),
+                    });
                 }
                 0x07 => {
                     let delta = args!(3);
                     for axis in 0..3 {
-                        committed.position[axis] = committed.position[axis].wrapping_add(delta[axis]);
+                        committed.position[axis] =
+                            committed.position[axis].wrapping_add(delta[axis]);
                     }
                 }
                 0x08 => {
                     let [low, high] = args!(2);
                     let span = high.wrapping_sub(low) as u32;
                     let offset = if span == 0 { 0 } else { (ctx.random)() % span };
-                    self.tasks.push(Task::Wait { start: now, duration: Some(offset.wrapping_add(low as u32)) });
+                    self.tasks.push(Task::Wait {
+                        start: now,
+                        duration: Some(offset.wrapping_add(low as u32)),
+                    });
                     self.waiting = true;
                 }
                 0x0A => {
                     let [label] = args!(1);
-                    let Some(target) = program.label(label) else { return RunResult::End; };
+                    let Some(target) = program.label(label) else {
+                        return RunResult::End;
+                    };
                     self.pc = target;
                     if ctx.skipping {
                         return RunResult::Yield;
@@ -385,7 +545,9 @@ impl AniThread {
                 }
                 0x0B => {
                     let [slot, label] = args!(2);
-                    if let (Some(child), Some(target)) = (children.get_mut(slot as u32 as usize), program.label(label)) {
+                    if let (Some(child), Some(target)) =
+                        (children.get_mut(slot as u32 as usize), program.label(label))
+                    {
                         *child = Some(AniThread::new(target));
                     }
                 }
@@ -395,7 +557,12 @@ impl AniThread {
                 }
                 0x0D => {
                     let [x, y, width, height] = args!(4);
-                    ctx.effects.push(AniEffect::SetRect([x, y, x.wrapping_add(width), y.wrapping_add(height)]));
+                    ctx.effects.push(AniEffect::SetRect([
+                        x,
+                        y,
+                        x.wrapping_add(width),
+                        y.wrapping_add(height),
+                    ]));
                 }
                 0x13 => self.persist = true,
                 0x14 => {
@@ -429,7 +596,10 @@ impl AniThread {
                 }
                 0xFE => {
                     let [duration] = args!(1);
-                    self.tasks.push(Task::Wait { start: now, duration: Some(duration as u32) });
+                    self.tasks.push(Task::Wait {
+                        start: now,
+                        duration: Some(duration as u32),
+                    });
                     self.waiting = true;
                 }
                 _ => return RunResult::End,
@@ -441,7 +611,10 @@ impl AniThread {
                 return RunResult::Yield;
             }
         }
-        log::warn!("[trace-ani] instruction budget exhausted at pc=0x{:X}", self.pc);
+        log::warn!(
+            "[trace-ani] instruction budget exhausted at pc=0x{:X}",
+            self.pc
+        );
         RunResult::Yield
     }
 }
@@ -482,7 +655,8 @@ impl AniPlayer {
     }
 
     fn run_main(&mut self, ctx: &mut AniContext<'_>) -> RunResult {
-        self.main.run(&self.program, ctx, &mut self.committed, &mut self.children)
+        self.main
+            .run(&self.program, ctx, &mut self.committed, &mut self.children)
     }
 
     /// One native frame (0x447060 children, then 0x446FE0 main). Returns
@@ -490,10 +664,15 @@ impl AniPlayer {
     pub fn advance(&mut self, ctx: &mut AniContext<'_>) -> bool {
         self.transient = MotionDelta::default();
         for slot in 0..CHILD_SLOTS {
-            let Some(mut child) = self.children[slot].take() else { continue; };
+            let Some(mut child) = self.children[slot].take() else {
+                continue;
+            };
             let mut grandchildren: [Option<AniThread>; CHILD_SLOTS] = Default::default();
             if !child.waiting
-                && matches!(child.run(&self.program, ctx, &mut self.committed, &mut grandchildren), RunResult::End)
+                && matches!(
+                    child.run(&self.program, ctx, &mut self.committed, &mut grandchildren),
+                    RunResult::End
+                )
             {
                 continue;
             }
@@ -503,7 +682,8 @@ impl AniPlayer {
         if !self.main.waiting && matches!(self.run_main(ctx), RunResult::End) {
             return false;
         }
-        self.main.tick(ctx.now_ms, &mut self.committed, &mut self.transient);
+        self.main
+            .tick(ctx.now_ms, &mut self.committed, &mut self.transient);
         true
     }
 
@@ -550,7 +730,10 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
-            Self { effects: Vec::new(), random: Box::new(|| 0) }
+            Self {
+                effects: Vec::new(),
+                random: Box::new(|| 0),
+            }
         }
 
         fn ctx(&mut self, now_ms: u32) -> AniContext<'_> {
@@ -603,7 +786,13 @@ mod tests {
 
     #[test]
     fn persist_flag_and_end_report_committed_delta() {
-        let code = [vec![0xFC, 0x13, 0xFD], op(0x00, &[10, -4, 0, 100]), op(0xFE, &[100]), vec![0xFF]].concat();
+        let code = [
+            vec![0xFC, 0x13, 0xFD],
+            op(0x00, &[10, -4, 0, 100]),
+            op(0xFE, &[100]),
+            vec![0xFF],
+        ]
+        .concat();
         let mut harness = Harness::new();
         let mut player = AniPlayer::start(program(&code, &[]), &mut harness.ctx(0)).unwrap();
         assert!(player.advance(&mut harness.ctx(50)));
@@ -624,18 +813,35 @@ mod tests {
 
     #[test]
     fn rect_effects_and_scale_follow_the_program() {
-        let code = [vec![0xFD], op(0x0C, &[3, 0]), op(0x0D, &[1, 2, 10, 20]), op(0x02, &[-30, 10]), op(0xFE, &[0])]
-            .concat();
+        let code = [
+            vec![0xFD],
+            op(0x0C, &[3, 0]),
+            op(0x0D, &[1, 2, 10, 20]),
+            op(0x02, &[-30, 10]),
+            op(0xFE, &[0]),
+        ]
+        .concat();
         let mut harness = Harness::new();
         let mut player = AniPlayer::start(program(&code, &[]), &mut harness.ctx(0)).unwrap();
-        assert_eq!(harness.effects, [AniEffect::RectSetPos(3, 0), AniEffect::SetRect([1, 2, 11, 22])]);
+        assert_eq!(
+            harness.effects,
+            [
+                AniEffect::RectSetPos(3, 0),
+                AniEffect::SetRect([1, 2, 11, 22])
+            ]
+        );
         assert!(player.advance(&mut harness.ctx(10)));
         assert!((player.delta().scale + 0.3).abs() < 1e-6);
     }
 
     #[test]
     fn wave_without_commit_returns_to_rest() {
-        let code = [vec![0xFD, 0x13], op(0x16, &[0, 0, 0, 10, 0, 256, 0, 0, 100]), op(0xFE, &[200])].concat();
+        let code = [
+            vec![0xFD, 0x13],
+            op(0x16, &[0, 0, 0, 10, 0, 256, 0, 0, 100]),
+            op(0xFE, &[200]),
+        ]
+        .concat();
         let mut harness = Harness::new();
         let mut player = AniPlayer::start(program(&code, &[]), &mut harness.ctx(0)).unwrap();
         assert!(player.advance(&mut harness.ctx(0)));
@@ -658,7 +864,8 @@ mod tests {
         .concat();
         let child_pc = 1 + 9 + 5 + 1;
         let mut harness = Harness::new();
-        let mut player = AniPlayer::start(program(&code, &[0, child_pc]), &mut harness.ctx(0)).unwrap();
+        let mut player =
+            AniPlayer::start(program(&code, &[0, child_pc]), &mut harness.ctx(0)).unwrap();
         assert!(player.advance(&mut harness.ctx(16)));
         assert_eq!(player.delta().position[0], 8);
     }

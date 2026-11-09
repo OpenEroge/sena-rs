@@ -19,6 +19,12 @@ pub(super) struct IconConfig {
     pub secondary_click: i32,
     pub secondary_hover: i32,
     pub secondary_update: i32,
+    /// trenka 14:25 (ctx +0x49AB8/+0x15D94/+0x15D8C): a plain separator
+    /// sprite drawn on every visible record (the script passes its
+    /// `[history] HISTORY_LINE_*` settings).
+    pub separator_enabled: bool,
+    pub separator_name: String,
+    pub separator_position: [i32; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +51,27 @@ struct VisibleIcon {
     click: i32,
     hover: i32,
     priority: i32,
+    /// Centre the sprite in a fixed record row once its height is known.
+    row_fit: Option<RowFit>,
+}
+
+/// trenka 0x42B7A0: `top = anchor - (row_height - height) / 2`; rows whose
+/// centred top rises above the view are dropped, then the offset applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowFit {
+    anchor: i32,
+    row_height: i32,
+    clip_top: i32,
+    offset_y: i32,
+}
+
+impl RowFit {
+    fn top(self, height: i32) -> Option<i32> {
+        let top = self
+            .anchor
+            .wrapping_sub(self.row_height.wrapping_sub(height) / 2);
+        (top >= self.clip_top).then(|| top.wrapping_add(self.offset_y))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +121,7 @@ impl ScriptRuntime {
     ) -> ExtCallOutcome {
         let count = match index {
             13 | 15 | 24 => 3,
+            25 => 4,
             14 | 17 | 18 | 21 => 1,
             16 | 19 | 23 => 0,
             22 => 5,
@@ -203,6 +231,20 @@ impl ScriptRuntime {
                 config.secondary_enabled = args[0] != 0;
                 config.secondary_position = [args[1], args[2]];
             }
+            25 => {
+                // 0x42D1A0 pops enable, File.dat name, x, y.
+                config.separator_enabled = args[0] != 0;
+                config.separator_position = [args[2], args[3]];
+                let name = self
+                    .resolve_resource_string(args[1], assets, nls)
+                    .unwrap_or_default();
+                log::debug!(
+                    "[trace-history] separator line enabled={} name={name:?} at={:?}",
+                    args[0],
+                    [args[2], args[3]]
+                );
+                self.history_state.icons.config.separator_name = name;
+            }
             _ => unreachable!(),
         }
         if let Some(audio) = audio {
@@ -301,6 +343,7 @@ impl ScriptRuntime {
                         click: 0,
                         hover: 0,
                         priority: 0i32.wrapping_sub(self.sprite_priority_cursor.wrapping_add(4871)),
+                        row_fit: None,
                     });
                 }
                 if config.face_enabled
@@ -331,6 +374,7 @@ impl ScriptRuntime {
                             click: config.face_click,
                             hover: 0,
                             priority,
+                            row_fit: None,
                         });
                     }
                 }
@@ -350,6 +394,25 @@ impl ScriptRuntime {
                         click: config.secondary_click,
                         hover: config.secondary_hover,
                         priority,
+                        row_fit: None,
+                    });
+                }
+                if config.separator_enabled && !config.separator_name.is_empty() {
+                    visible.push(VisibleIcon {
+                        button: false,
+                        group: -1,
+                        index: ordinal,
+                        name: config.separator_name.clone(),
+                        position: [left + config.separator_position[0], top + record_top],
+                        click: 0,
+                        hover: 0,
+                        priority: 0i32.wrapping_sub(self.sprite_priority_cursor.wrapping_add(4871)),
+                        row_fit: Some(RowFit {
+                            anchor: top + record_top,
+                            row_height: self.history_state.layout[6],
+                            clip_top: top,
+                            offset_y: config.separator_position[1],
+                        }),
                     });
                 }
             }
@@ -384,12 +447,25 @@ impl ScriptRuntime {
                 let result = open_resource_variant(resources, &icon.name, IMAGE_EXTENSIONS)
                     .map_err(anyhow::Error::from)
                     .and_then(|asset| decode_asset_image(resources, &asset));
+                if let Err(error) = &result {
+                    log::debug!(
+                        "[trace-history] icon {:?} could not load: {error}",
+                        icon.name
+                    );
+                }
                 if let Ok(image) = result {
+                    let y = match icon.row_fit {
+                        Some(fit) => match fit.top(image.height as i32) {
+                            Some(y) => y,
+                            None => continue,
+                        },
+                        None => icon.position[1],
+                    };
                     if let Some(handle) = sprites.create_rgba_sprite(
                         image.width,
                         image.height,
                         image.rgba,
-                        PalVec3::new(icon.position[0], icon.position[1], 0),
+                        PalVec3::new(icon.position[0], y, 0),
                         icon.priority,
                         icon.name.clone(),
                     ) {
@@ -480,5 +556,25 @@ impl ScriptRuntime {
         }
         self.history_state.icons.visible.clear();
         self.history_state.icons.valid = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RowFit;
+
+    #[test]
+    fn separator_line_centres_in_the_row_and_clips_above_the_view() {
+        let fit = RowFit {
+            anchor: 100,
+            row_height: 60,
+            clip_top: 0,
+            offset_y: 5,
+        };
+        assert_eq!(fit.top(20), Some(85));
+        // Odd differences truncate toward zero like the native `sar` after `cdq`.
+        assert_eq!(fit.top(21), Some(86));
+        let fit = RowFit { anchor: 10, ..fit };
+        assert_eq!(fit.top(20), None);
     }
 }
