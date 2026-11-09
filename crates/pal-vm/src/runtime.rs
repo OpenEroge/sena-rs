@@ -13913,6 +13913,10 @@ impl ScriptRuntime {
             }
             return ExtCallOutcome::Value(1);
         }
+        // Native 5:2 (trenka.exe 0x435A30, Totsulover 0x462990) pops
+        // slot, name, flags, fade_ms and a sound-group selector. Bit 2 of the
+        // flags selects PalSoundPlayFade with fade_ms; the selector indexes
+        // the PAL group table {5, 4, 6}. There is no volume operand.
         let args = self.pop_ext_args(5);
         if args.len() < 5 {
             return ExtCallOutcome::Block;
@@ -13922,20 +13926,28 @@ impl ScriptRuntime {
         } else {
             args[0]
         };
+        if index != 2 {
+            // Non-extended 5:1 arity differs by build (trenka pops three:
+            // slot, flags, fade_ms; Koikake scripts push four), so keep the
+            // legacy five-operand reading until each build is audited.
+            return self.audio_load_and_play(5, slot, PalSoundGroup::GROUP4, args[1], args[3],
+                args[4], true, None, assets, nls, resource_manager, audio, 0);
+        }
+        let group = se_play_group(args[4]);
         self.audio_load_and_play(
             5,
             slot,
-            PalSoundGroup::GROUP4,
+            group,
             args[1],
-            args[3],
-            args[4],
+            args[2],
+            100,
             true,
             None,
             assets,
             nls,
             resource_manager,
             audio,
-            0,
+            args[3],
         )
     }
 
@@ -14284,8 +14296,9 @@ impl ScriptRuntime {
         nls: Nls,
         resource_manager: Option<&mut ResourceManager>,
         audio: Option<&mut AudioSystem>,
-        voice_fade_ms: i32,
+        fade_ms: i32,
     ) -> ExtCallOutcome {
+        let mut audio = audio;
         let Some(name) = self.resolve_resource_string(name_value, assets, nls) else {
             return ExtCallOutcome::Value(0);
         };
@@ -14323,12 +14336,13 @@ impl ScriptRuntime {
         }
         if category == 13 {
             return if self.load_voice_audio(slot, group, &name, flags, volume_percent,
-                play, voice_fade_ms, resource_manager, audio) {
+                play, fade_ms, resource_manager, audio) {
                 ExtCallOutcome::Value(slot)
             } else {
                 ExtCallOutcome::Value(0)
             };
         }
+        let fade = if category == 5 && flags & 4 != 0 { fade_ms.max(0) } else { 0 };
         if self.load_named_audio(
             category,
             slot,
@@ -14336,11 +14350,18 @@ impl ScriptRuntime {
             &name,
             flags,
             volume_percent,
-            play,
+            play && fade == 0,
             loop_samples,
             resource_manager,
-            audio,
+            audio.as_deref_mut(),
         ) {
+            if play && fade != 0 {
+                if let (Some(audio), Some(&handle)) = (audio, self.game_audio.get(&(category, slot))) {
+                    if let Err(err) = audio.play_fade(handle, flags & 1 != 0, fade) {
+                        log::warn!("[trace-audio] play_fade category={category} slot={slot} failed: {err}");
+                    }
+                }
+            }
             ExtCallOutcome::Value(slot)
         } else {
             ExtCallOutcome::Value(0)
@@ -16026,6 +16047,16 @@ enum NamedSpriteAnimation {
         delta: i32,
         duration_ms: u32,
     },
+}
+
+/// PAL group selected by the last SE play operand (native table {5, 4, 6}).
+/// Out-of-range selectors read past the native table; keep the SE group.
+fn se_play_group(selector: i32) -> PalSoundGroup {
+    match selector {
+        0 => PalSoundGroup::GROUP5,
+        2 => PalSoundGroup::GROUP6,
+        _ => PalSoundGroup::GROUP4,
+    }
 }
 
 fn parse_named_sprite_animation(bytes: &[u8]) -> Option<NamedSpriteAnimation> {
@@ -19043,6 +19074,14 @@ mod tests {
             assert_eq!(vm.pc, 16);
             assert_eq!(vm.stack, [777]);
         }
+    }
+
+    #[test]
+    fn se_play_last_operand_selects_native_group_table() {
+        assert_eq!(se_play_group(0), PalSoundGroup::GROUP5);
+        assert_eq!(se_play_group(1), PalSoundGroup::GROUP4);
+        assert_eq!(se_play_group(2), PalSoundGroup::GROUP6);
+        assert_eq!(se_play_group(-1), PalSoundGroup::GROUP4);
     }
 
     #[test]

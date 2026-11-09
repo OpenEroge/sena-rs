@@ -8,10 +8,10 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 
 | Recorded status | Count |
 |---|---:|
-| Blocked | 156 |
-| Partial | 68 |
+| Blocked | 145 |
+| Partial | 77 |
 | StackDisciplineOnly | 2 |
-| Verified | 141 |
+| Verified | 143 |
 
 | Coordinate | Name | Pop | Display parameters (pop index) | Status | Source | Purpose |
 |---|---|---:|---|---|---|---|
@@ -105,7 +105,7 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 3:46 | `sp_show` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Show sprite; VM calls PalSpriteViewCtrl(slot, true) after popping only the slot. |
 | 3:47 | `sp_hide` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Hide sprite; VM calls PalSpriteViewCtrl(slot, false) after popping only the slot. |
 | 3:48 | `is_sp` | 1 | slot (0, SpriteSlot) | Verified | explicit | Test whether a sprite slot currently exists. |
-| 3:49 | `sp_set_child` | 5 | parent_slot (0, SpriteSlot), child_slot (1, SpriteSlot), offset_x (2, CoordinateX), offset_y (3, CoordinateY), child_index (4, Integer) | Blocked | explicit | Attach a child sprite lane to a parent sprite. |
+| 3:49 | `sp_set_child` | 5 | parent_slot (0, SpriteSlot), child_slot (1, SpriteSlot), offset_x (2, CoordinateX), offset_y (3, CoordinateY), child_index (4, Integer) | Verified | explicit | Attach a child sprite lane to a parent sprite. |
 | 3:50 | `sp_set_transition` | 4 | slot (1, SpriteSlot), name (0, ResourceStringFromFileDat), transition_id (2, Integer), duration_ms (3, DurationMs) | Blocked | explicit | Replace a sprite image and queue a PAL transition from the old image to the new image. |
 | 3:51 | `sp_copy_image` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Move the current sprite image into the wrapper's transition source/copy lane. |
 | 3:52 | `sp_transition` | 3 | slot (0, SpriteSlot), transition_id (1, Integer), duration_ms (2, DurationMs) | Blocked | explicit | Start a PAL transition for the current sprite, using any saved source image lane. |
@@ -114,14 +114,14 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 3:55 | `sp_set_mask` | 9 | slot (0, SpriteSlot), dst_x (1, CoordinateX), dst_y (2, CoordinateY), width (3, Integer), height (4, Integer), mask_resource (5, ResourceStringFromFileDat), mask_x (6, CoordinateX), mask_y (7, CoordinateY), lane (8, Integer) | Verified | explicit | Apply an alpha mask resource to a live sprite surface. |
 | 3:56 | `sp_set_motion_pos` | 9 | slot (0, SpriteSlot), arg1 (1, Integer), arg2 (2, Integer), arg3 (3, Integer), arg4 (4, Integer), resource (5, ResourceStringFromFileDat), arg6 (6, Integer), arg7 (7, Integer), lane (8, Integer) | Blocked | explicit | Configure native sprite motion/bitblt lane with nine parameters. |
 | 3:57 | `sp_set_anim` | 3 | slot (0, SpriteSlot), name (1, ResourceStringFromFileDat), flag (2, Flag) | Blocked | explicit | Alias/wrapper for sprite animation setup. |
-| 4:0 | `bgm_play` | 7 | slot (0, SoundSlot), unknown (1, Unknown), name (2, ResourceStringFromFileDat), flags (3, Flag), volume (4, Volume), unknown2 (5, Unknown), unknown3 (6, Unknown) | Blocked | explicit | Load/play BGM with slot and volume parameters. |
+| 4:0 | `bgm_play` | 7 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), flags (2, Flag), fade_units (3, Integer), initial_bytes (4, Integer), loop_start_bytes (5, Integer), loop_end_bytes (6, Integer) | Partial | explicit | Load and play BGM using the native byte-range descriptor and fade flags. |
 | 4:1 | `bgm_stop` | 2 | slot (0, SoundSlot), fade_ms (1, DurationMs) | Blocked | explicit | Stop BGM slot, optionally with fade. |
 | 4:2 | `bgm_set_volume` | 1 | volume (0, Volume) | Blocked | explicit | Set global BGM volume; runtime pops 1 arg (volume only, no per-slot). |
-| 4:3 | `bgm_get_volume` | 1 | slot (0, SoundSlot) | Blocked | explicit | Read BGM volume state. |
+| 4:3 | `bgm_get_volume` | 0 |  | Partial | explicit | Return the configured BGM percent. |
 | 4:4 | `bgm_get_auto_volume` | 0 |  | Blocked | automatic | Reachable Game.exe extcall 0004:0004 (bgm_get_auto_volume) for BGM audio state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
 | 4:6 | `bgm_set_auto_volume` | 2 | enabled (0, Flag), volume (1, Volume) | Blocked | explicit | Configure BGM automatic volume/ducking state. |
 | 4:8 | `get_bgm_filename` | 0 |  | Blocked | automatic | Reachable Game.exe extcall 0004:0008 (get_bgm_filename) for BGM audio state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
-| 4:9 | `bgm_load` | 5 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), unknown (2, Unknown), unknown2 (3, Unknown), unknown3 (4, Unknown) | Blocked | explicit | Preload BGM resource into a slot. |
+| 4:9 | `bgm_load` | 5 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), initial_bytes (2, Integer), loop_start_bytes (3, Integer), loop_end_bytes (4, Integer) | Partial | explicit | Preload BGM; any nonzero range word enables the native PCM byte range. |
 | 4:11 | `set_master_volume` | 1 | volume (0, Volume) | Blocked | explicit | Set primary/master volume percent. |
 | 4:12 | `get_master_volume` | 0 |  | Blocked | automatic | Reachable Game.exe extcall 0004:000C (get_master_volume) for BGM audio state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
 | 4:13 | `mute_master_volume` | 1 | muted (0, Flag) | Blocked | explicit | Mute/unmute primary volume while preserving configured percent. |
@@ -129,7 +129,7 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 4:15 | `mute_bgm_auto_volume` | 1 | muted (0, Flag) | Blocked | explicit | Toggle BGM automatic volume mute latch. |
 | 5:0 | `se_load` | 2 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat) | Blocked | explicit | Preload SE resource. |
 | 5:1 | `se_play` | 5 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), unknown (2, Unknown), flags (3, Flag), volume (4, Volume) | Blocked | explicit | Play SE resource. |
-| 5:2 | `se_play_ex` | 5 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), unknown (2, Unknown), flags (3, Flag), volume (4, Volume) | Blocked | explicit | Play SE resource; observed before first text_w. |
+| 5:2 | `se_play_ex` | 5 | slot (0, SoundSlot), name (1, ResourceStringFromFileDat), flags (2, Flag), fade_ms (3, DurationMs), group (4, Mode) | Verified | explicit | Load and play an SE resource; flags select loop/fade, the last operand selects the PAL sound group. |
 | 5:3 | `se_stop` | 2 | slot (0, SoundSlot), fade_ms (1, DurationMs) | Blocked | explicit | Stop SE slot. |
 | 5:4 | `se_set_volume` | 2 | volume (0, Volume), slot (1, SoundSlot) | Verified | explicit | Set SE lane volume. |
 | 5:5 | `se_get_volume` | 1 | slot (0, SoundSlot) | Blocked | explicit | Read SE volume. |
@@ -253,12 +253,12 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 10:34 | `is_prev_data` | 0 |  | Blocked | automatic | Reachable Game.exe extcall 000A:0022 (is_prev_data) for save/load UI state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
 | 10:35 | `save_point_clear` | 0 |  | Blocked | automatic | Reachable Game.exe extcall 000A:0023 (save_point_clear) for save/load UI state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
 | 10:36 | `save_point_lock` | 1 | slot (0, SpriteSlot) | Blocked | automatic | Reachable Game.exe extcall 000A:0024 (save_point_lock) for save/load UI state; parameters are named in runtime pop order and must stay synchronized with pal-vm pop_ext_args. |
-| 11:0 | `movie_play` | 2 | layer (0, SpriteSlot), name (1, ResourceStringFromFileDat) | Blocked | explicit | Open/play a full-screen or layer movie resource. |
-| 11:1 | `msp_set_loop_sp_ep` | 8 | slot (0, SpriteSlot), name (1, ResourceStringFromFileDat), loop_mode (2, Mode), loop_start (3, Integer), loop_end (4, Integer), x (5, CoordinateX), y (6, CoordinateY), z (7, CoordinateZ) | Blocked | explicit | Load an MSprite/movie into a sprite slot and configure loop/start/end points. |
-| 11:2 | `msp_cls` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Release an MSprite/movie slot. |
-| 11:3 | `msp_wait` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Wait until an MSprite/movie slot reaches the native finished bit. |
-| 11:4 | `msp_lock` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Lock/pause decoder frame advancement. |
-| 11:5 | `msp_unlock` | 1 | slot (0, SpriteSlot) | Blocked | explicit | Unlock/resume decoder frame advancement. |
+| 11:0 | `movie_play` | 2 | name (0, ResourceStringFromFileDat), flags (1, Mode) | Partial | explicit | Start the global full-screen movie and gate normal game updates. |
+| 11:1 | `msp_set_loop_sp_ep` | 8 | name (0, ResourceStringFromFileDat), slot (1, SpriteSlot), x (2, CoordinateX), y (3, CoordinateY), z (4, CoordinateZ), loop_mode (5, Mode), loop_start_ms (6, Integer), loop_end_ms (7, Integer) | Partial | explicit | Load a generic sprite, set movie loop points, and start its movie worker. |
+| 11:2 | `msp_cls` | 1 | slot (0, SpriteSlot) | Partial | explicit | Release a script sprite slot through generic sp_cls. |
+| 11:3 | `msp_wait` | 1 | slot (0, SpriteSlot) | Partial | explicit | Wait for natural movie completion or a scheduler skip state. |
+| 11:4 | `msp_lock` | 1 | slot (0, SpriteSlot) | Partial | explicit | Set the movie-worker and renderer lock flags. |
+| 11:5 | `msp_unlock` | 1 | slot (0, SpriteSlot) | Partial | explicit | Clear the movie-worker and renderer lock flags. |
 | 12:0 | `system_btn_set` | 3 | index (0, ButtonSlot), image (1, Integer), state (2, Mode) | Verified | explicit | Bind an input shortcut slot (16 = right mouse button) to a script gosub point. |
 | 12:1 | `system_btn_release` | 1 | index (0, ButtonSlot) | Blocked | explicit | Release a system/menu button entry. |
 | 12:2 | `system_btn_enable` | 2 | index (0, ButtonSlot), enabled (1, Flag) | Verified | explicit | Enable/disable a system/menu button entry. |

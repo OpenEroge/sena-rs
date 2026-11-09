@@ -1585,32 +1585,26 @@ static SIG_SE_PLAY: ExtSig = sig!(5, 1, "se_play", pop=5,
     status=Blocked, decompiler=Blocked, evidence=[Writeup:"docs/writeup.md audio"]);
 /// category 5 index 2: se_play_ex
 ///
-/// Purpose: Play a sound effect; extended variant observed before first text_w
-/// in many scenes.  Shares the same 5-arg layout as se_play.
+/// Purpose: Load a File.dat sound resource into an SE slot and play it.
 ///
-/// VM arguments (same as se_play):
-/// - pop[0]: slot (SoundSlot)
-/// - pop[1]: name (ResourceStringFromFileDat)
-/// - pop[2]: unknown (Unknown)
-/// - pop[3]: flags (Flag)
-/// - pop[4]: volume (Volume)
+/// VM arguments (native pop order, trenka.exe 0x435A30 and Totsulover
+/// 0x462990 agree):
+/// - pop[0]: slot (SoundSlot) — SE slot 0..15, or -1 for the first free one.
+/// - pop[1]: name (ResourceStringFromFileDat) — File.dat resource.
+/// - pop[2]: flags (Flag) — bit 0 loop, bit 2 PalSoundPlayFade, bit 5 apply
+///   the pending pan.
+/// - pop[3]: fade_ms (DurationMs) — fade-in length used when bit 2 is set.
+/// - pop[4]: group (Mode) — index into the native PAL group table {5, 4, 6}.
+///
+/// There is no volume operand; channel volume stays at its default.
 ///
 /// Return: void.
 ///
 /// Side effects: CreatesSound, PlaysSound.
-///
-/// Evidence:
-/// - Writeup: docs/writeup.md 24.1
-///
-/// Engine: Blocked — shares se_play dispatch path.
-///
-/// Decompiler: Blocked — renders 5 args.
-///
-/// Open points: Exact behavioral difference from se_play (index 1) not reversed.
 static SIG_SE_PLAY_EX: ExtSig = sig!(5, 2, "se_play_ex", pop=5,
-    params=["slot":0=SoundSlot, "name":1=ResourceStringFromFileDat, "unknown":2=Unknown, "flags":3=Flag, "volume":4=Volume],
-    return=Void, effects=[CreatesSound, PlaysSound], purpose="Play SE resource; observed before first text_w.",
-    status=Blocked, decompiler=Blocked, evidence=[Writeup:"docs/writeup.md 24.1"]);
+    params=["slot":0=SoundSlot, "name":1=ResourceStringFromFileDat, "flags":2=Flag, "fade_ms":3=DurationMs, "group":4=Mode],
+    return=Void, effects=[CreatesSound, PlaysSound], purpose="Load and play an SE resource; flags select loop/fade, the last operand selects the PAL sound group.",
+    status=Verified, decompiler=Partial, evidence=[Disassembly:"trenka.exe 0x435A30 pops slot, name, flags, fade_ms, group selector (table 0x625FF4 = {5,4,6}); Totsulover 0x462990 has the same layout"]);
 /// category 5 index 0: se_load
 ///
 /// Purpose: Preload a sound effect resource into a slot without playing it.
