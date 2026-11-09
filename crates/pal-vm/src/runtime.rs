@@ -3632,6 +3632,55 @@ impl ScriptRuntime {
             .max(500)
     }
 
+    /// Show a message line (text_w and its variants). `revealed_chars`
+    /// leading characters appear at once, the rest types out.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_text_line(
+        &mut self,
+        index: u16,
+        ordered: [i32; 4],
+        record_history: bool,
+        revealed_chars: usize,
+        assets: &CoreAssets,
+        nls: Nls,
+        resource_manager: Option<&mut ResourceManager>,
+        audio: Option<&mut AudioSystem>,
+    ) -> ExtCallOutcome {
+        self.text_state.last_text_args = ordered;
+        self.text_state.last_text_value = ordered[1];
+        self.text_state.last_event_time_ms = self.pal_time_ms;
+        let duration = if index == 16 {
+            0
+        } else {
+            self.text_reveal_duration_ms(ordered[1], ordered[0], assets, nls)
+        };
+        let body = self.adv_text_parts_for_render(assets, nls).0;
+        let total_chars = parse_pal_text_directives(&body).0.chars().count().max(1);
+        let shown_ms = (u64::from(duration) * revealed_chars.min(total_chars) as u64
+            / total_chars as u64) as u32;
+        self.text_state.reveal_start_ms = self.pal_time_ms.wrapping_sub(shown_ms);
+        self.text_state.reveal_duration_ms = duration;
+        self.text_state.reveal_enabled = duration > shown_ms;
+        self.text_state.show_wait_mark = false;
+        self.text_state.visible = true;
+        self.text_state.dirty = true;
+        if record_history {
+            self.push_history_text_record(ordered, assets, nls);
+        }
+        self.try_play_text_voice(ordered[3], assets, nls, resource_manager, audio);
+        let reveal_ms = duration.saturating_sub(shown_ms);
+        log::debug!("[trace-text] text_wait index={index} args={ordered:?} reveal_ms={reveal_ms}");
+        // Game.exe sub_43FFC0 (text_w), sub_43FC60, and sub_43F900 set
+        // ctx+804084 after mutating the ADV text context. Native scheduling
+        // lets the PAL text task run before the next script command; model
+        // that as a text-reveal wait when the line has a nonzero reveal
+        // duration.
+        ExtCallOutcome::Wait {
+            value: 1,
+            request: self.text_wait_request_after_submit(ordered[1], reveal_ms, assets, nls),
+        }
+    }
+
     fn text_wait_request_after_submit(
         &mut self,
         text_value: i32,
@@ -5569,6 +5618,9 @@ impl ScriptRuntime {
                 13 => self.ext_process_checkpoint_set(),
                 14 => self.ext_update_access(assets, nls),
                 15 => self.ext_system_task_value(),
+                // trenka 0x4182C0 pops nothing and returns a stamp decoded from
+                // the executable image; only an unreferenced point reads it.
+                17 if assets.native_build.defines_extcall(18, 17) => ExtCallOutcome::Value(0),
                 17 => self.ext_work_process_value(),
                 18 => self.ext_string_replace(assets, nls),
                 21 => self.ext_strlenf(assets, nls),
@@ -5594,6 +5646,13 @@ impl ScriptRuntime {
             },
             7 => self.dispatch_wait_ext(index),
             8 => self.dispatch_button_ext(index, assets, nls, resource_manager, sprites, input, audio),
+            // trenka set_cursor (0x438970) also pops the hotspot x and y; the
+            // portable cursor stays the default arrow.
+            9 if index == 48 && assets.native_build.defines_extcall(9, 48) => {
+                self.pop_ext_args(3);
+                self.system_state.set_cursor_null(true);
+                ExtCallOutcome::Value(1)
+            }
             9 => self.dispatch_font_system_stub(index, input),
             10 => self.dispatch_save_stub(index, assets, nls, resource_manager, sprites),
             12 => self.dispatch_system_button_stub(index),
@@ -6449,40 +6508,43 @@ impl ScriptRuntime {
             15 | 16 | 17 => {
                 let args = self.pop_ext_args(4);
                 let ordered = ext_args_source_order::<4>(&args);
-                self.text_state.last_text_args = ordered;
-                self.text_state.last_text_value = ordered[1];
-                self.text_state.last_event_time_ms = self.pal_time_ms;
-                self.text_state.reveal_start_ms = self.pal_time_ms;
-                self.text_state.reveal_duration_ms = if index == 16 {
-                    0
-                } else {
-                    self.text_reveal_duration_ms(ordered[1], ordered[0], assets, nls)
-                };
-                self.text_state.reveal_enabled = self.text_state.reveal_duration_ms > 0;
-                self.text_state.show_wait_mark = false;
-                self.text_state.visible = true;
-                self.text_state.dirty = true;
-                self.push_history_text_record(ordered, assets, nls);
-                self.try_play_text_voice(ordered[3], assets, nls, resource_manager, audio);
-                let reveal_ms = self.text_state.reveal_duration_ms;
-                log::debug!(
-                    "[trace-text] text_wait index={index} args={ordered:?} reveal_ms={}",
-                    reveal_ms
-                );
-                // Game.exe sub_43FFC0 (text_w), sub_43FC60, and sub_43F900
-                // set ctx+804084 after mutating the ADV text context.  Native
-                // scheduling lets the PAL text task run before the next script
-                // command; model that as a text-reveal wait when the line has
-                // a nonzero reveal duration.
-                ExtCallOutcome::Wait {
-                    value: 1,
-                    request: self
-                        .text_wait_request_after_submit(ordered[1], reveal_ms, assets, nls),
-                }
+                self.submit_text_line(index, ordered, true, 0, assets, nls, resource_manager, audio)
+            }
+            // trenka text_n (0x43F620) shows a line like text_w without a
+            // backlog record; text_cat (0x43F3C0) appends its body to the
+            // current line, which stays revealed, again without a record.
+            18 if assets.native_build.defines_extcall(2, 18) => {
+                let args = self.pop_ext_args(4);
+                let ordered = ext_args_source_order::<4>(&args);
+                self.submit_text_line(index, ordered, false, 0, assets, nls, resource_manager, audio)
+            }
+            19 if assets.native_build.defines_extcall(2, 19) => {
+                let args = self.pop_ext_args(4);
+                let mut ordered = ext_args_source_order::<4>(&args);
+                let shown = self.adv_text_parts_for_render(assets, nls).0;
+                let addition = self
+                    .resolve_script_string(ordered[1], assets, nls)
+                    .unwrap_or_default();
+                let prefix_chars = parse_pal_text_directives(&shown).0.chars().count();
+                ordered[1] = self.store_dynamic_string(shown + &addition);
+                self.submit_text_line(
+                    index, ordered, false, prefix_chars, assets, nls, resource_manager, audio,
+                )
             }
             18 | 19 => {
                 self.pop_ext_args(0);
                 self.text_state.last_event_time_ms = self.pal_time_ms;
+                ExtCallOutcome::Value(1)
+            }
+            // trenka set_history (0x43E760) pops voice, name and text and
+            // records a backlog line without showing it; the script pairs it
+            // with text_n/text_cat, which leave the backlog alone.
+            20 if assets.native_build.defines_extcall(2, 20) => {
+                let args = self.pop_ext_args(3);
+                let [voice, name, text] = args[..] else {
+                    return ExtCallOutcome::Block;
+                };
+                self.push_history_text_record([0, text, name, voice], assets, nls);
                 ExtCallOutcome::Value(1)
             }
             20 => {
@@ -7066,6 +7128,9 @@ impl ScriptRuntime {
                 log::debug!("[trace-save] save_point_clear");
                 ExtCallOutcome::Value(1)
             }
+            29 if assets.native_build.defines_extcall(10, 29) => {
+                self.ext_swap_save_files(resource_manager)
+            }
             3 | 6 | 21 | 29 => {
                 self.pop_ext_args(1);
                 ExtCallOutcome::Value(1)
@@ -7466,6 +7531,49 @@ impl ScriptRuntime {
             "[trace-save] thumbnail_set slot={slot} save_slot={save_slot} pos=({x},{y}) size={width}x{height}"
         );
         ExtCallOutcome::Value(1)
+    }
+
+    /// trenka 10:29 (0x4317C0, the save screen's "data move") pops slots A
+    /// and B and swaps their save files through `save_tmp.dat`; the snapshot,
+    /// lock and newest-save marker follow the files.
+    fn ext_swap_save_files(&mut self, resource_manager: Option<&mut ResourceManager>) -> ExtCallOutcome {
+        let args = self.pop_ext_args(2);
+        let [first, second] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        let Some(manager) = resource_manager else {
+            return ExtCallOutcome::Value(0);
+        };
+        let path = |slot| {
+            find_loose_save_file(manager.root(), &original_save_filename(slot))
+                .unwrap_or_else(|| original_save_path(manager.root(), slot))
+        };
+        let (first_path, second_path) = (path(first), path(second));
+        let temp = second_path.with_file_name("save_tmp.dat");
+        let mut moved = std::fs::rename(&second_path, &temp).is_ok();
+        if first != -1 {
+            moved &= std::fs::rename(&first_path, &second_path).is_ok();
+        }
+        moved &= std::fs::rename(&temp, &first_path).is_ok();
+        fn swap<T>(map: &mut BTreeMap<i32, T>, first: i32, second: i32) {
+            let (a, b) = (map.remove(&first), map.remove(&second));
+            if let Some(value) = b {
+                map.insert(first, value);
+            }
+            if let Some(value) = a {
+                map.insert(second, value);
+            }
+        }
+        swap(&mut self.save_state.snapshots, first, second);
+        swap(&mut self.save_state.locks, first, second);
+        let remembered = &mut self.save_state.remembered_slot;
+        if *remembered == second {
+            *remembered = first;
+        } else if *remembered == first {
+            *remembered = second;
+        }
+        log::debug!("[trace-save] swap_files first={first} second={second} moved={moved}");
+        ExtCallOutcome::Value(i32::from(moved))
     }
 
     fn ext_copy_save_file(
@@ -8859,6 +8967,7 @@ impl ScriptRuntime {
             35 => self.ext_sp_get_anim_param(),
             36 => self.ext_sp_get_scale(sprites),
             37 => self.ext_sp_set_color(sprites),
+            38 if assets.native_build.defines_extcall(3, 38) => self.ext_sp_bitblt_sprite(sprites),
             38 => self.ext_sp_bitblt(sprites),
             39 => self.ext_sp_set_shake(sprites),
             40 => self.ext_sprite_paint(assets, nls, sprites),
@@ -12662,6 +12771,35 @@ impl ScriptRuntime {
             100
         };
         ExtCallOutcome::Value(value)
+    }
+
+    /// trenka 3:38 `sp_bitblt` (0x426FD0) pops destination slot, x, y,
+    /// width, height, source slot, source x, source y and a lane (-1..8),
+    /// then copies the rectangle with PalCopySpriteToSpriteRGB (0x423C20).
+    fn ext_sp_bitblt_sprite(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+        let args = self.pop_ext_args(9);
+        let [dst_slot, dst_x, dst_y, width, height, src_slot, src_x, src_y, lane] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        if !(-1..=128).contains(&dst_slot)
+            || !(-1..=128).contains(&src_slot)
+            || !(-1..=8).contains(&lane)
+        {
+            return ExtCallOutcome::Value(0);
+        }
+        let (Some(sprites), Some(dst), Some(src)) = (
+            sprites,
+            self.game_sprites.get(&dst_slot).copied(),
+            self.game_sprites.get(&src_slot).copied(),
+        ) else {
+            return ExtCallOutcome::Value(1);
+        };
+        let (width, height) = (width.max(0) as u32, height.max(0) as u32);
+        let copied = sprites.copy_sprite_to_sprite_rgb(dst, dst_x, dst_y, src, src_x, src_y, width, height);
+        log::debug!(
+            "[trace-sprite] sp_bitblt dst={dst_slot} ({dst_x},{dst_y}) src={src_slot} ({src_x},{src_y}) size={width}x{height} copied={copied}"
+        );
+        ExtCallOutcome::Value(1)
     }
 
     fn ext_sp_bitblt(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
@@ -18889,6 +19027,31 @@ mod tests {
             assert_eq!(outcome, ExtCallOutcome::Value(expected));
             assert_eq!(vm.stack, vec![5]);
         }
+    }
+
+    #[test]
+    fn trenka_text_cat_appends_and_set_history_records_the_line() {
+        let (mut assets, points) = empty_core_assets(false);
+        assets.native_build = crate::assets::NativeBuild::Trenka;
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.text_state.history_enabled = true;
+        let first = vm.store_dynamic_string("あい".to_owned());
+        let rest = vm.store_dynamic_string("うえ".to_owned());
+        let name = vm.store_dynamic_string("名".to_owned());
+        vm.stack = vec![0, first, name, 0x0FFF_FFFF];
+        vm.dispatch_extcall(2, 18, &[], &assets, &points, None, None, None, None, None);
+        assert!(vm.stack.is_empty());
+        assert_eq!(vm.history_state.records.len(), 0);
+        vm.stack = vec![0, rest, name, 0x0FFF_FFFF];
+        vm.dispatch_extcall(2, 19, &[], &assets, &points, None, None, None, None, None);
+        assert!(vm.stack.is_empty());
+        assert_eq!(vm.adv_text_parts_for_render(&assets, Nls::ShiftJis).0, "あいうえ");
+        let whole = vm.store_dynamic_string("あいうえ".to_owned());
+        vm.stack = vec![whole, name, 0x0FFF_FFFF];
+        let outcome = vm.dispatch_extcall(2, 20, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(outcome, ExtCallOutcome::Value(1));
+        assert!(vm.stack.is_empty());
+        assert_eq!(vm.history_state.records.len(), 1);
     }
 
     #[test]
