@@ -15134,8 +15134,10 @@ impl ScriptRuntime {
             .resolve_script_string(args[1], assets, nls)
             .unwrap_or_default();
         let default = args[2];
+        // Native resolves the file name through File.dat (0x44B500), unlike
+        // the section and key script strings (0x44B470).
         let requested_filename = self
-            .resolve_script_string(args[3], assets, nls)
+            .resolve_resource_string(args[3], assets, nls)
             .unwrap_or_else(|| "SYSTEM.INI".to_owned());
         let filename = ini_filename_or_system(&requested_filename);
 
@@ -15143,8 +15145,7 @@ impl ScriptRuntime {
             Some(ini) => ini
                 .get(&section.to_ascii_lowercase())
                 .and_then(|section| section.get(&key.to_ascii_lowercase()))
-                .and_then(|value| value.as_int())
-                .map(|value| value as i32)
+                .map(profile_int)
                 .unwrap_or(default),
             None => default,
         };
@@ -15174,8 +15175,10 @@ impl ScriptRuntime {
         let default = self
             .resolve_script_string(args[2], assets, nls)
             .unwrap_or_default();
+        // Native resolves the file name through File.dat (0x44B500), unlike
+        // the section and key script strings (0x44B470).
         let requested_filename = self
-            .resolve_script_string(args[4], assets, nls)
+            .resolve_resource_string(args[4], assets, nls)
             .unwrap_or_else(|| "SYSTEM.INI".to_owned());
         let filename = ini_filename_or_system(&requested_filename);
         let value = match self.system_ini(resource_manager) {
@@ -15225,8 +15228,10 @@ impl ScriptRuntime {
             .resolve_script_string(args[1], assets, nls)
             .unwrap_or_default();
         let value = args[2];
+        // Native resolves the file name through File.dat (0x44B500), unlike
+        // the section and key script strings (0x44B470).
         let requested_filename = self
-            .resolve_script_string(args[3], assets, nls)
+            .resolve_resource_string(args[3], assets, nls)
             .unwrap_or_else(|| "SYSTEM.INI".to_owned());
         let filename = ini_filename_or_system(&requested_filename).to_owned();
         self.write_system_ini_shadow(
@@ -15265,8 +15270,10 @@ impl ScriptRuntime {
         let value = self
             .resolve_script_string(args[2], assets, nls)
             .unwrap_or_default();
+        // Native resolves the file name through File.dat (0x44B500), unlike
+        // the section and key script strings (0x44B470).
         let requested_filename = self
-            .resolve_script_string(args[3], assets, nls)
+            .resolve_resource_string(args[3], assets, nls)
             .unwrap_or_else(|| "SYSTEM.INI".to_owned());
         let filename = ini_filename_or_system(&requested_filename).to_owned();
         self.write_system_ini_shadow(
@@ -17741,6 +17748,25 @@ fn alpha_blend_rgba(dst: &mut [u8], src: &[u8]) {
     dst[3] = out_a.min(255) as u8;
 }
 
+/// GetPrivateProfileInt reads the leading decimal integer of a present key
+/// (`TIPS_FLAG = 1;` is 1) and yields 0 when it has no digits.
+fn profile_int(value: &crate::config::IniValue) -> i32 {
+    if let Some(value) = value.as_int() {
+        return value as i32;
+    }
+    let text = value.as_str().unwrap_or_default().trim_start();
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let magnitude = digits
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0i32, |value, digit| value.wrapping_mul(10).wrapping_add(i32::from(digit - b'0')));
+    if negative { magnitude.wrapping_neg() } else { magnitude }
+}
+
 fn ini_first_int(ini: &IniFile, key: &str) -> Option<i64> {
     let key = key.to_ascii_lowercase();
     ini.values()
@@ -19078,6 +19104,15 @@ mod tests {
         // A third line would pass the height limit (36 + 18 > 40).
         assert_eq!(wrap_save_title("あいうえおかきくけこ", 16, 40, 40, narrow), "あい\nうえ");
         assert_eq!(wrap_save_title("a<tag>b", 16, 1000, 100, narrow), "ab");
+    }
+
+    #[test]
+    fn profile_int_reads_the_leading_integer() {
+        use crate::config::IniValue;
+        assert_eq!(profile_int(&IniValue::Str("1;".into())), 1);
+        assert_eq!(profile_int(&IniValue::Str(" -16 ; x".into())), -16);
+        assert_eq!(profile_int(&IniValue::Str("abc".into())), 0);
+        assert_eq!(profile_int(&IniValue::Int(7)), 7);
     }
 
     #[test]

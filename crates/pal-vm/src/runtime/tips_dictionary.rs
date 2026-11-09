@@ -1,5 +1,5 @@
-//! trenka.exe dictionary ("TIPS") table and save-folder string helpers
-//! (category 18 indices 50, 59, 82..87).
+//! trenka.exe dictionary ("TIPS") table, save-folder string helpers and the
+//! global word table (category 18 indices 50, 59, 72, 73, 79, 82..87).
 //!
 //! Native 0x41C880 parses a four-column CSV (name, reading, small image,
 //! large image) into 0x6C-byte records that also keep a kana row index and
@@ -31,10 +31,14 @@ struct TipsEntry {
     flags: [u8; 2],
 }
 
+/// Entries of the unsaved global table at 0x82EFE4 (18:72/18:73).
+const GLOBAL_WORDS: usize = 0x1000;
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct TipsDictionary {
     entries: Vec<TipsEntry>,
     flag_path: String,
+    globals: Vec<i32>,
 }
 
 /// Map a script path below the reported save folder to the real save
@@ -137,6 +141,34 @@ impl ScriptRuntime {
         }
         match index {
             50 => self.ext_get_save_folder(),
+            72 => {
+                // 0x41BBC0: pop index then value; no destination write.
+                let args = self.pop_ext_args(2);
+                let [index, value] = args[..] else { return ExtCallOutcome::Block; };
+                if (index as u32 as usize) < GLOBAL_WORDS {
+                    let globals = &mut self.tips_dictionary.globals;
+                    globals.resize(GLOBAL_WORDS, 0);
+                    globals[index as usize] = value;
+                }
+                ExtCallOutcome::Continue
+            }
+            73 => {
+                // 0x41BC70: out-of-range indexes leave the destination alone.
+                let args = self.pop_ext_args(1);
+                let Some(&index) = args.first() else { return ExtCallOutcome::Block; };
+                if (index as u32 as usize) < GLOBAL_WORDS {
+                    ExtCallOutcome::Value(self.tips_dictionary.globals.get(index as usize).copied().unwrap_or(0))
+                } else {
+                    ExtCallOutcome::Continue
+                }
+            }
+            79 => {
+                // 0x41BD00 stores a word (0x832FE4) no audited wrapper reads.
+                if self.pop_ext_args(1).is_empty() {
+                    return ExtCallOutcome::Block;
+                }
+                ExtCallOutcome::Continue
+            }
             59 => {
                 // 0x41BAA0 appends without writing the destination slot.
                 let _ = self.ext_string_append(assets, nls);
@@ -291,7 +323,7 @@ mod tests {
         let text = "\"A\",\"か\",\"s1\",\"b1\"\r\n\"B\",\"ン\",\"s2\",\"b2\"\r\n";
         let mut dictionary = TipsDictionary {
             entries: TipsDictionary::parse(text, Nls::ShiftJis).unwrap(),
-            flag_path: String::new(),
+            ..Default::default()
         };
         assert_eq!(dictionary.entries[0].fields, ["A", "か", "s1", "b1"].map(String::from));
         assert_eq!(dictionary.entries[0].row, 1);
