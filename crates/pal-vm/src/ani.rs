@@ -261,9 +261,8 @@ impl Task {
                 } else {
                     transient
                 };
-                for axis in 0..3 {
-                    target.position[axis] =
-                        target.position[axis].wrapping_add(scaled(delta[axis], factor));
+                for (value, &step) in target.position.iter_mut().zip(delta.iter()) {
+                    *value = value.wrapping_add(scaled(step, factor));
                 }
                 elapsed < *duration
             }
@@ -278,9 +277,8 @@ impl Task {
                 } else {
                     transient
                 };
-                for axis in 0..3 {
-                    target.rotation[axis] =
-                        target.rotation[axis].wrapping_add(scaled(delta[axis], factor));
+                for (value, &step) in target.rotation.iter_mut().zip(delta.iter()) {
+                    *value = value.wrapping_add(scaled(step, factor));
                 }
                 elapsed < *duration
             }
@@ -365,8 +363,8 @@ impl Task {
                 committed.position[1] = committed.position[1].wrapping_add(delta[1]);
             }
             Self::Rotate { delta, .. } => {
-                for axis in 0..3 {
-                    committed.rotation[axis] = committed.rotation[axis].wrapping_add(delta[axis]);
+                for (value, &step) in committed.rotation.iter_mut().zip(delta.iter()) {
+                    *value = value.wrapping_add(step);
                 }
             }
             Self::Scale { delta, .. } => committed.scale += *delta as f32 / 100.0,
@@ -518,9 +516,8 @@ impl AniThread {
                 }
                 0x07 => {
                     let delta = args!(3);
-                    for axis in 0..3 {
-                        committed.position[axis] =
-                            committed.position[axis].wrapping_add(delta[axis]);
+                    for (value, &step) in committed.position.iter_mut().zip(delta.iter()) {
+                        *value = value.wrapping_add(step);
                     }
                 }
                 0x08 => {

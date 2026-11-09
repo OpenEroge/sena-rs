@@ -26,22 +26,8 @@ impl ScriptRuntime {
             // duration; portable sprites load synchronously and draw every
             // frame.
             (3, 42 | 43) => self.pop_operands(1, ExtCallOutcome::Continue),
-            // 0x40BB20 bgm_set_volume_users pops three words for the user
-            // volume fade; the user volume stays with the system settings.
-            (4, 5) => self.pop_operands(3, ExtCallOutcome::Continue),
-            (4, 16) => self.ext_bgm_status(audio),
-            // 0x40C610 get_bgm_pos pops channel and PalSoundGetParam selector.
-            (4, 17) => {
-                let args = self.pop_ext_args(2);
-                let Some(&channel) = args.first() else {
-                    return Some(ExtCallOutcome::Block);
-                };
-                ExtCallOutcome::Value(if self.bgm_channel(channel).is_some() {
-                    0
-                } else {
-                    -1
-                })
-            }
+            (4, 5) => self.ext_bgm_fade_channel_volume(),
+            (4, 16 | 17) => self.ext_bgm_query(index == 17, assets, audio),
             (8, 28) => self.ext_btn_link(),
             (8, 30) => self.ext_btn_get_link(),
             // 0x438970 set_cursor pops name and hotspot; the portable cursor
@@ -102,23 +88,87 @@ impl ScriptRuntime {
         ExtCallOutcome::Value(1)
     }
 
+    /// 0x40BB20 bgm_set_volume_users pops channel, volume percent and
+    /// duration, then fades the channel volume linearly from its current
+    /// value (0x40B280 applies `PalSoundSetVolumeChannel(volume * 100)`); a
+    /// skip makes the fade immediate.
+    fn ext_bgm_fade_channel_volume(&mut self) -> ExtCallOutcome {
+        let args = self.pop_ext_args(3);
+        let [channel, volume, duration] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        if let Some(handle) = self.bgm_channel(channel) {
+            let duration_ms = if self.dispatch_skip_state() != 0 {
+                0
+            } else {
+                duration.max(0) as u32
+            };
+            self.channel_fades.retain(|fade| fade.handle != handle);
+            self.channel_fades.push(ChannelFade {
+                handle,
+                from: None,
+                to: percent_to_volume(volume).raw(),
+                start_ms: self.pal_time_ms,
+                duration_ms,
+            });
+        }
+        ExtCallOutcome::Continue
+    }
+
+    /// Step the 4:5 channel fades; called once per frame.
+    pub(crate) fn advance_channel_fades(&mut self, audio: &mut AudioSystem) {
+        let now = self.pal_time_ms;
+        self.channel_fades.retain_mut(|fade| {
+            let Ok(current) = audio.channel_volume(fade.handle) else {
+                return false;
+            };
+            let from = *fade.from.get_or_insert(current.raw());
+            let elapsed = now.wrapping_sub(fade.start_ms).min(fade.duration_ms);
+            let raw = if fade.duration_ms == 0 {
+                fade.to
+            } else {
+                from + (fade.to - from) * elapsed as i32 / fade.duration_ms as i32
+            };
+            let _ = audio.set_channel_volume(fade.handle, PalVolume::from_raw(raw));
+            elapsed < fade.duration_ms
+        });
+    }
+
     /// The BGM slot a native channel operand names; -1 is the current one.
     fn bgm_channel(&self, channel: i32) -> Option<AudioHandle> {
         let slot = if channel == -1 { 0 } else { channel };
         self.game_audio.get(&(4, slot)).copied()
     }
 
-    /// 0x40C560 get_bgm_status: playing state of the channel, -1 without one.
-    fn ext_bgm_status(&mut self, audio: Option<&mut AudioSystem>) -> ExtCallOutcome {
-        let args = self.pop_ext_args(1);
+    /// 0x40C560 get_bgm_status pops a channel; 0x40C610 get_bgm_pos also
+    /// pops a PalSoundGetParam selector. Channel -1 is PalSoundGetNowChannel;
+    /// no channel answers -1. Status is PalSoundGetStatus.
+    fn ext_bgm_query(
+        &mut self,
+        param: bool,
+        assets: &CoreAssets,
+        audio: Option<&mut AudioSystem>,
+    ) -> ExtCallOutcome {
+        let args = self.pop_ext_args(if param { 2 } else { 1 });
         let Some(&channel) = args.first() else {
             return ExtCallOutcome::Block;
         };
-        let Some(handle) = self.bgm_channel(channel) else {
+        let Some(audio) = audio else {
             return ExtCallOutcome::Value(-1);
         };
-        let playing = audio.is_some_and(|audio| audio.is_playing(handle).unwrap_or(false));
-        ExtCallOutcome::Value(i32::from(playing))
+        let channel = if channel == -1 {
+            audio.now_channel()
+        } else {
+            channel
+        };
+        if channel < 0 {
+            return ExtCallOutcome::Value(-1);
+        }
+        let value = match args.get(1) {
+            Some(&selector) => audio.sound_param(channel, selector, assets.extended_softpal),
+            None => audio.native_group3_status(channel),
+        };
+        ExtCallOutcome::Value(value.unwrap_or(-1))
     }
 
     /// 0x410410 btn_link pops group and two indexes and links the two
@@ -240,4 +290,14 @@ impl ScriptRuntime {
         });
         ExtCallOutcome::Value(i32::from(written))
     }
+}
+
+/// A running 4:5 channel volume fade (raw PAL volume units).
+#[derive(Clone, Debug)]
+pub(super) struct ChannelFade {
+    handle: AudioHandle,
+    from: Option<i32>,
+    to: i32,
+    start_ms: u32,
+    duration_ms: u32,
 }

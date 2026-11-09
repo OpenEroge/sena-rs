@@ -501,6 +501,8 @@ pub struct ScriptRuntime {
     button_links: BTreeMap<(i32, i32), i32>,
     /// trenka 18:113/18:114 target of 18:115 appends (inside the save folder).
     append_file: Option<PathBuf>,
+    /// trenka 4:5 BGM channel volume fades.
+    channel_fades: Vec<trenka_wrappers::ChannelFade>,
     next_button_registration: u64,
     /// Native `btn_init` group records: normal/hover resource ids plus the
     /// current onmouse index returned by category 8 index 23.
@@ -1526,6 +1528,7 @@ impl ScriptRuntime {
             button_tips: BTreeMap::new(),
             button_links: BTreeMap::new(),
             append_file: None,
+            channel_fades: Vec::new(),
             next_button_registration: 1,
             button_groups: BTreeMap::new(),
             button_push_queue: BTreeMap::new(),
@@ -11126,7 +11129,8 @@ impl ScriptRuntime {
     /// mode. A slot that holds a sprite gets the text typeset into it at
     /// (x, y) by the message-window renderer (0x43CC30, shared with the
     /// backlog): text_init font size, wrap width and line pitch, the current
-    /// font colour. An empty slot is left alone.
+    /// font colour, and the sprite rect is cut to the typeset block. An empty
+    /// slot is left alone.
     fn ext_draw_text(
         &mut self,
         assets: &CoreAssets,
@@ -11162,6 +11166,12 @@ impl ScriptRuntime {
             );
         }
         self.font_state.set_font_size(saved_size);
+        // 0x43D54B then limits the sprite rect to the typeset block:
+        // (0, 0, wrap + font size + 2, last line y + pitch + 2).
+        let last_line_y = y.wrapping_add(pitch.wrapping_mul(lines.len().saturating_sub(1) as i32));
+        let right = (wrap_width as i32).wrapping_add(i32::from(font_size)).wrapping_add(2);
+        let bottom = last_line_y.wrapping_add(pitch).wrapping_add(2);
+        let _ = sprites.set_rect(handle, Some(PalRect::new(0, 0, right, bottom)));
         log::debug!(
             "[trace-sprite] drawtext slot={slot} lines={} at=({x}, {y}) pitch={pitch}",
             lines.len()

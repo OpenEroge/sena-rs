@@ -675,6 +675,7 @@ impl Engine {
                 runtime.advance_actions(&mut self.sprites);
                 runtime.play_action_sounds(&mut self.audio);
             }
+            runtime.advance_channel_fades(&mut self.audio);
             runtime.release_retired_sprites(&mut self.sprites);
         }
 

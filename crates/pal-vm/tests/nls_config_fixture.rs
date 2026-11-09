@@ -122,6 +122,10 @@ fn startup_config_reads_system_ini_logical_size_before_vm_runs() {
         .parent()
         .unwrap()
         .join("testcase");
+    if !root.is_dir() {
+        eprintln!("skipping: the Koikake testcase fixture is not present");
+        return;
+    }
     let config = EngineStartupConfig::load(&root, Nls::ShiftJis).expect("startup config");
     assert!(config.system_ini.is_some(), "SYSTEM.INI must be loaded");
     assert_eq!(

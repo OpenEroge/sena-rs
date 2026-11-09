@@ -626,7 +626,10 @@ fn high_frequency_pal_extcalls_are_stack_safe() {
     let entry_pc = 12u32;
     let mut body = Vec::new();
 
-    // btn_get_push(): no input should mean no selected/pushed title button.
+    // btn_get_push(group=0): no input should mean no selected/pushed button.
+    // The wrapper pops its group operand (scripts push it, e.g. `push 9`).
+    body.extend_from_slice(&opcode(31));
+    body.extend_from_slice(&word(imm(0)));
     body.extend_from_slice(&opcode(23));
     body.extend_from_slice(&word(ext_raw(8, 17)));
     body.extend_from_slice(&word(dst_slot(0)));
@@ -689,13 +692,12 @@ fn high_frequency_pal_extcalls_are_stack_safe() {
         .expect("high-frequency PAL extcalls should run");
 
     assert_eq!(runtime.vars()[0], 0);
-    for index in 1..=3 {
-        assert_eq!(
-            runtime.vars()[index],
-            1,
-            "var[{index}] should report success"
-        );
-    }
+    assert_eq!(runtime.vars()[1], 1, "btn_set_anim reports success");
+    // btn_set_hit queues a button reaction and, like the native wrapper
+    // (trenka 0x40D890), never writes its destination slot.
+    assert_eq!(runtime.vars()[2], 0, "btn_set_hit leaves its destination alone");
+    assert_eq!(runtime.vars()[3], 1, "sp_set_shake reports success");
+    assert_eq!(runtime.stack_depth(), 0, "every extcall consumed its operands");
     assert_eq!(
         runtime.vars()[4],
         0,
