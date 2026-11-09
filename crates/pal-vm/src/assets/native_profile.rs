@@ -40,6 +40,7 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 
 /// Extcall coordinates where trenka.exe has its own audited wrapper: a new
 /// coordinate or a different operand contract from the registered builds.
+/// - 3:13 `sp_cls_transition` (0x4293D0): slot, transition kind, duration.
 /// - 3:32 `sp_create` (0x4267D0): slot, File.dat name, x, y, width, height.
 /// - 3:58 `drawtext` (0x42A3F0): wrapped text into an existing sprite.
 /// - 8:27 `btn_blt` (0x40FEA0), 8:31/8:32 button tips word (0x410610/0x410720).
@@ -48,6 +49,7 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 ///   save-folder and string helpers, favourite voices with their global word
 ///   table, the texture-allocation hint and the scene-skip query.
 const TRENKA_OWN_EXTCALLS: &[(u16, u16, u16)] = &[
+    (3, 13, 13),
     (3, 32, 32),
     (3, 58, 58),
     (8, 27, 27),

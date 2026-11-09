@@ -8812,6 +8812,9 @@ impl ScriptRuntime {
                 false,
             ),
             4 => self.ext_sp_set_pos_ex(sprites),
+            13 if assets.native_build.defines_extcall(3, 13) => {
+                self.ext_sp_cls_transition(sprites, task_system)
+            }
             5 | 13 => self.ext_sp_cls(sprites, task_system),
             11 => self.ext_sp_cls_ex(sprites, task_system),
             6 => self.ext_sp_set_alpha(sprites),
@@ -11387,6 +11390,40 @@ impl ScriptRuntime {
             let _ = self.ext_sp_cls(sprites.as_deref_mut(), task_system.as_deref_mut());
         }
         ExtCallOutcome::Value(1)
+    }
+
+    /// trenka 3:13 (0x4293D0) pops slot, transition kind and duration. With
+    /// effects running it clears the slot through a transition; while
+    /// skipping, or for a zero duration, it clears at once. The portable path
+    /// fades the sprite out over the duration, then runs the sp_cls
+    /// bookkeeping for the slot.
+    fn ext_sp_cls_transition(
+        &mut self,
+        mut sprites: Option<&mut SpriteSystem>,
+        task_system: Option<&mut TaskSystem>,
+    ) -> ExtCallOutcome {
+        let args = self.pop_ext_args(3);
+        let [slot, _kind, duration] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        let fading = match (u32::try_from(duration), self.skip_engaged(), sprites.is_some()) {
+            (Ok(duration_ms @ 1..), false, true) => {
+                self.game_sprites.remove(&slot).map(|handle| (handle, duration_ms))
+            }
+            _ => None,
+        };
+        self.stack.push(slot);
+        let outcome = self.ext_sp_cls(sprites.as_deref_mut(), task_system);
+        // sp_cls ends fades already retired for the slot, so retire this one after it.
+        if let (Some((handle, duration_ms)), Some(sprites)) = (fading, sprites) {
+            let _ = sprites.tween_alpha_to(handle, 0, duration_ms);
+            self.retired_sprites.push(RetiredSprite {
+                slot,
+                handle,
+                release_at_ms: self.pal_time_ms.wrapping_add(duration_ms),
+            });
+        }
+        outcome
     }
 
     fn ext_sp_cls(
@@ -18811,6 +18848,26 @@ mod tests {
         vm.stack = vec![3, 8];
         let skipped = vm.dispatch_extcall(8, 32, &[], &assets, &points, None, None, None, None, None);
         assert_ne!(skipped, ExtCallOutcome::Value(42));
+    }
+
+    #[test]
+    fn trenka_sp_cls_transition_consumes_its_operands_and_fades_the_slot() {
+        let (mut assets, points) = empty_core_assets(false);
+        assets.native_build = crate::assets::NativeBuild::Trenka;
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let mut sprites = SpriteSystem::new();
+        let handle = sprites
+            .create_rgba_sprite(4, 4, vec![255; 64], PalVec3::default(), 0, "slot 30")
+            .unwrap();
+        vm.game_sprites.insert(30, handle);
+        vm.stack = vec![7, 300, 1, 30];
+        let outcome = vm.dispatch_extcall(
+            3, 13, &[], &assets, &points, None, Some(&mut sprites), None, None, None,
+        );
+        assert_eq!(outcome, ExtCallOutcome::Value(1));
+        assert_eq!(vm.stack, vec![7]);
+        assert!(!vm.game_sprites.contains_key(&30));
+        assert!(vm.retired_sprites.iter().any(|retired| retired.handle == handle));
     }
 
     #[test]

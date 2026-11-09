@@ -81,6 +81,10 @@ present slot does not mean Sena implements the handler's semantics.
   surface). 3:22 `sp_text` (0x427520) draws into an existing wrapper with
   `PalSpriteCreateTextEx`, which writes glyphs over the locked surface at
   (x, y); Totsulover `sub_449B90` does the same.
+- 3:13 `sp_cls_transition` (0x4293D0) pops slot, transition kind (index
+  into {0, 1} at 0x625F94) and duration; with effects running it clears
+  the slot through `PalSpriteCreateTransitionHandle`, otherwise at once.
+  Treating it as one-operand sp_cls left two words on the VM stack per call.
 - 3:58 `drawtext` (0x42A3F0) pops slot, text, x, y, mode and typesets the
   text into an existing sprite with the message-window renderer 0x43CC30
   (text_init font size, wrap width and pitch; also used by the backlog).
