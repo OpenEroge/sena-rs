@@ -1,6 +1,7 @@
 //! trenka.exe dictionary ("TIPS") table and save-folder string helpers
 //! (category 18 indices 50, 59, 82..87); the per-build dispatcher also
-//! routes favourite voices (voice_favorites.rs) and the 108 query.
+//! routes strcut (57), favourite voices (voice_favorites.rs), 106, 107 and
+//! 108.
 //!
 //! Native 0x41C880 parses a four-column CSV (name, reading, small image,
 //! large image) into 0x6C-byte records that also keep a kana row index and
@@ -142,6 +143,38 @@ impl TipsDictionary {
     }
 }
 
+/// 0x41B86C: count characters by stepping over a byte that follows a
+/// high-bit byte or a CR, then, past `limit`, cut at `2 * limit` (or one byte
+/// later when that byte is not a lead byte). Returns the count and the cut.
+fn strcut_bytes(bytes: &[u8], limit: i32) -> (i32, Option<usize>) {
+    let mut count = 0i32;
+    let mut index = 0;
+    if bytes.first().is_some_and(|&byte| byte != 0) {
+        loop {
+            index += 1;
+            let mut byte = bytes.get(index).copied().unwrap_or(0);
+            if byte >= 0x80 || byte == b'\r' {
+                index += 1;
+                byte = bytes.get(index).copied().unwrap_or(0);
+            }
+            count += 1;
+            if byte == 0 {
+                break;
+            }
+        }
+    }
+    if count <= limit || limit < 0 {
+        return (count, None);
+    }
+    let base = limit as usize * 2;
+    let cut = if bytes.get(base).is_some_and(|&byte| byte >= 0x80) {
+        base
+    } else {
+        base + 1
+    };
+    (count, Some(cut.min(bytes.len())))
+}
+
 impl ScriptRuntime {
     /// Category 18 coordinates that only some audited builds define.
     pub(super) fn dispatch_build_system_ext(
@@ -161,9 +194,19 @@ impl ScriptRuntime {
                 let _ = self.ext_string_append(assets, nls);
                 ExtCallOutcome::Continue
             }
+            57 => self.ext_strcut(nls),
             60..=68 | 72 | 73 | 79 => {
                 self.dispatch_voice_favorites(index, assets, nls, resource_manager)
             }
+            106 => {
+                // 0x41E780 forwards one byte to PalSetPow, which only forces
+                // power-of-two GPU allocations; logical sizes are unchanged.
+                if self.pop_ext_args(1).is_empty() {
+                    return ExtCallOutcome::Block;
+                }
+                ExtCallOutcome::Continue
+            }
+            107 => self.ext_dynamic_strlen(nls),
             // 0x41E8C0 reads the scene-skip latch that 9:51/9:52 set and clear.
             108 => ExtCallOutcome::Value(i32::from(self.scene_skip_active)),
             82 => self.ext_tips_read(assets, nls, resource_manager),
@@ -173,6 +216,47 @@ impl ScriptRuntime {
             87 => self.ext_tips_save_flags(resource_manager.as_deref()),
             _ => ExtCallOutcome::Skip,
         }
+    }
+
+    /// 0x41B7C0 `strcut`: pop a dynamic string and a character limit. Returns
+    /// the character count; a longer string is cut in place.
+    fn ext_strcut(&mut self, nls: Nls) -> ExtCallOutcome {
+        let args = self.pop_ext_args(2);
+        let [handle, limit] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        let Some(text) = dynamic_string_index(handle)
+            .map(|index| self.dynamic_strings.get(index).cloned().unwrap_or_default())
+        else {
+            return ExtCallOutcome::Value(0);
+        };
+        let Ok(bytes) = nls.encode(&text) else {
+            return ExtCallOutcome::Value(0);
+        };
+        let (count, cut) = strcut_bytes(&bytes, limit);
+        if let Some(cut) = cut {
+            let kept = (0..=cut)
+                .rev()
+                .find_map(|end| nls.decode(&bytes[..end]).ok())
+                .unwrap_or_default();
+            self.replace_dynamic_string(handle, kept);
+        }
+        ExtCallOutcome::Value(count)
+    }
+
+    /// 0x41E7D0: encoded byte length of a dynamic string; any other value
+    /// (including script literals) is 0.
+    fn ext_dynamic_strlen(&mut self, nls: Nls) -> ExtCallOutcome {
+        let args = self.pop_ext_args(1);
+        let Some(&value) = args.first() else {
+            return ExtCallOutcome::Block;
+        };
+        let length = dynamic_string_index(value)
+            .and_then(|index| self.dynamic_strings.get(index))
+            .map_or(0, |text| {
+                nls.encode(text).map_or(text.len(), |bytes| bytes.len())
+            });
+        ExtCallOutcome::Value(length as i32)
     }
 
     /// 0x419F40: copy the save folder into a string slot and return 1.
@@ -379,5 +463,17 @@ mod tests {
         assert_eq!(dictionary.entries[1].flags, [0, 1]);
         assert_eq!(dictionary.encode_flags(), b"1001");
         assert!(TipsDictionary::parse("\"A\",\"\",\"s\",\"b\"", Nls::ShiftJis).is_none());
+    }
+
+    #[test]
+    fn strcut_counts_double_byte_characters_and_cuts_past_the_limit() {
+        let sjis = |text: &str| Nls::ShiftJis.encode(text).unwrap();
+        assert_eq!(strcut_bytes(b"", 3), (0, None));
+        assert_eq!(strcut_bytes(&sjis("あいう"), 3), (3, None));
+        assert_eq!(strcut_bytes(&sjis("あいうえ"), 2), (4, Some(4)));
+        // A CR/LF pair counts once; a single-byte character at the cut keeps
+        // one more byte.
+        assert_eq!(strcut_bytes(b"ab\r\ncd", 9), (5, None));
+        assert_eq!(strcut_bytes(b"abcdef", 2), (6, Some(5)));
     }
 }

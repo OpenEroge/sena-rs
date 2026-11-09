@@ -174,7 +174,9 @@ impl ScriptRuntime {
                     };
                     (resolve(name), resolve(voice), resolve(text))
                 };
-                ExtCallOutcome::Value(self.voice_favorites.add(id, &name, &voice, &text, nls))
+                let added = self.voice_favorites.add(id, &name, &voice, &text, nls);
+                log::debug!("[trace-favorites] favadd voice={voice:?} -> {added}");
+                ExtCallOutcome::Value(added)
             }
             62 => {
                 let args = self.pop_ext_args(1);
@@ -236,6 +238,12 @@ impl ScriptRuntime {
                         file.parent().map_or(Ok(()), std::fs::create_dir_all)?;
                         std::fs::write(&file, bytes)
                     });
+                log::debug!(
+                    "[trace-favorites] favsave {} records={} ok={}",
+                    file.display(),
+                    self.voice_favorites.records.len(),
+                    written.is_ok()
+                );
                 if let Err(error) = &written {
                     log::warn!(
                         "[trace-favorites] favsave {} failed: {error}",

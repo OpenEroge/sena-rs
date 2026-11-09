@@ -47,9 +47,17 @@ impl NativeBuild {
     }
 
     /// trenka.exe defines extra category 18 wrappers: the dictionary table,
-    /// save-folder helpers, favourite voices with their global word table
-    /// and the scene-skip query (18:50, 59, 60..68, 72, 73, 79, 82..87, 108).
+    /// save-folder and string helpers (strcut, dynamic strlen), favourite
+    /// voices with their global word table, the texture-allocation hint and
+    /// the scene-skip query (18:50, 57, 59, 60..68, 72, 73, 79, 82..87,
+    /// 106..108).
     pub fn defines_system_extensions(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
+    /// trenka.exe's 3:32 creates a sprite from a File.dat name with an
+    /// explicit position and size (six operands) instead of an empty wrapper.
+    pub fn sprite_create_from_resource(self) -> bool {
         self == NativeBuild::Trenka
     }
 

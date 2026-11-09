@@ -82,7 +82,7 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 3:19 | `face_init` | 5 | face_id (0, Integer), sprite_slot (1, SpriteSlot), center_x (2, Coordinate), center_y (3, Coordinate), priority_lane (4, Integer) | Verified | explicit | Initialize a face/part slot mapping and anchor table entry. |
 | 3:20 | `face_set` | 4 | resource (0, ResourceStringFromFileDat), face_id (1, Integer), dx (2, Coordinate), dy (3, Coordinate) | Verified | explicit | Load or clear a face/standing-picture part through the face table. |
 | 3:21 | `sp_get_color` | 1 | slot (0, SpriteSlot) | Verified | explicit | Return a sprite's RGB color, or -1 when no image exists. |
-| 3:22 | `sptext` | 5 | slot (0, SpriteSlot), text_id (1, TextId), x (2, CoordinateX), y (3, CoordinateY), mode (4, Mode) | Blocked | explicit | Create a transparent text sprite through the PAL font/text surface path. |
+| 3:22 | `sptext` | 5 | slot (0, SpriteSlot), text_id (1, TextId), x (2, CoordinateX), y (3, CoordinateY), mode (4, Mode) | Blocked | explicit | Draw text into the slot's existing sprite at (x, y), or create a transparent text sprite when the slot is empty. |
 | 3:23 | `face_cls` | 1 | face_id (0, Integer) | Verified | explicit | Release the sprite currently mapped to a face table entry. |
 | 3:24 | `sp_set_rect` | 5 | slot (0, SpriteSlot), left (1, CoordinateX), top (2, CoordinateY), right (3, CoordinateX), bottom (4, CoordinateY) | Verified | explicit | Set a sprite source rectangle. |
 | 3:25 | `sp_set_pos_move` | 4 | slot (0, SpriteSlot), dx (1, CoordinateX), dy (2, CoordinateY), dz (3, CoordinateZ) | Blocked | explicit | Move or tween a sprite by a relative delta. |

@@ -8828,6 +8828,9 @@ impl ScriptRuntime {
             29 => self.ext_sp_get_dimension(sprites, true),
             30 => self.ext_sp_get_dimension(sprites, false),
             31 => self.ext_sp_surface_image(assets, nls, resource_manager, sprites),
+            32 if assets.native_build.sprite_create_from_resource() => {
+                self.ext_sp_create_from_resource(assets, nls, resource_manager, sprites)
+            }
             32 => self.ext_sp_create(sprites),
             33 => self.ext_sp_anime_clear(sprites),
             34 => self.ext_sp_set_anim_param(),
@@ -10085,15 +10088,8 @@ impl ScriptRuntime {
         }
     }
 
-    fn ext_sp_create(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
-        let args = self.pop_ext_args(1);
-        if args.is_empty() {
-            return ExtCallOutcome::Block;
-        }
-        let slot = args[0];
-        let Some(sprites) = sprites else {
-            return ExtCallOutcome::Value(0);
-        };
+    /// Drop a slot's wrapper state before `sp_create` installs a new sprite.
+    fn release_slot_for_create(&mut self, slot: i32, sprites: &mut SpriteSystem) {
         if let Some(old) = self.game_sprites.remove(&slot) {
             sprites.release(old);
         }
@@ -10103,6 +10099,84 @@ impl ScriptRuntime {
         self.game_sprite_child_offsets.remove(&slot);
         self.game_sprite_vis_clip_slots.remove(&slot);
         self.clear_pending_position_actions_for_slot(slot);
+    }
+
+    /// trenka 3:32 (0x4267D0) pops slot, File.dat name, x, y, width and
+    /// height, loads the named sprite (a `#AARRGGBB` name becomes a
+    /// width x height surface) and places it at (x, y). Scripts use it as a
+    /// canvas for 3:56 blits and 3:22 text.
+    fn ext_sp_create_from_resource(
+        &mut self,
+        assets: &CoreAssets,
+        nls: Nls,
+        resource_manager: Option<&mut ResourceManager>,
+        sprites: Option<&mut SpriteSystem>,
+    ) -> ExtCallOutcome {
+        let args = self.pop_ext_args(6);
+        let [slot, name_value, x, y, width, height] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        if !(-1..=128).contains(&slot) {
+            return ExtCallOutcome::Value(0);
+        }
+        let Some(sprites) = sprites else {
+            return ExtCallOutcome::Value(0);
+        };
+        self.release_slot_for_create(slot, sprites);
+        if name_value == 0x0FFF_FFFF {
+            return ExtCallOutcome::Value(1);
+        }
+        let name = self
+            .resolve_resource_string(name_value, assets, nls)
+            .unwrap_or_default();
+        let image = if let Some((a, r, g, b)) = parse_solid_color_name_argb(&name) {
+            let clamp = |extent: i32| extent.clamp(1, 4096) as u32;
+            let (width, height) = (clamp(width), clamp(height));
+            let rgba = [r, g, b, a].repeat(width as usize * height as usize);
+            Some((width, height, rgba))
+        } else {
+            resource_manager.and_then(|resources| {
+                open_resource_variant(resources, &name, IMAGE_EXTENSIONS)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|asset| decode_asset_image(resources, &asset))
+                    .map(|image| (image.width, image.height, image.rgba))
+                    .map_err(|error| {
+                        log::warn!("[trace-sprite] sp_create slot={slot} name={name:?}: {error}")
+                    })
+                    .ok()
+            })
+        };
+        let Some((width, height, rgba)) = image else {
+            return ExtCallOutcome::Value(0);
+        };
+        let Some(handle) = sprites.create_rgba_sprite(
+            width,
+            height,
+            rgba,
+            PalVec3::new(x, y, 0),
+            game_sprite_priority(slot, self.sprite_priority_cursor),
+            format!("sp_create:{name}"),
+        ) else {
+            return ExtCallOutcome::Value(0);
+        };
+        self.game_sprites.insert(slot, handle);
+        self.apply_pending_alpha_actions(sprites, slot, handle);
+        log::debug!(
+            "[trace-sprite] sp_create slot={slot} name={name:?} size={width}x{height} pos=({x}, {y})"
+        );
+        ExtCallOutcome::Value(1)
+    }
+
+    fn ext_sp_create(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+        let args = self.pop_ext_args(1);
+        if args.is_empty() {
+            return ExtCallOutcome::Block;
+        }
+        let slot = args[0];
+        let Some(sprites) = sprites else {
+            return ExtCallOutcome::Value(0);
+        };
+        self.release_slot_for_create(slot, sprites);
         let surface_id = sprites.allocate_surface_id();
         let pixels = vec![0u8; 4];
         let surface = match SpriteSurface::rgba8(surface_id, 1, 1, 1, pixels) {
@@ -10866,23 +10940,21 @@ impl ScriptRuntime {
         if temporary_size.is_some() {
             self.font_state.set_font_size(saved_size);
         }
-        if let Some(old_state) = self.game_msprites.remove(&slot) {
-            if let Some(handle) = old_state.handle {
-                self.msprite_system.release(handle);
-            }
-        }
         if let Some(handle) = self.game_sprites.get(&slot).copied() {
-            if !sprites.replace_sprite_surface(handle, width, height, rgba, format!("text:{text}"))
-            {
+            // An existing wrapper gets PalSpriteCreateTextEx: the text is drawn
+            // over its surface at (x, y) without clearing or moving it
+            // (trenka 0x427688, Totsulover sub_449B90).
+            if !sprites.composite_rgba_to_sprite(
+                handle, x, y, width, height, &rgba, 0, 0, width, height,
+            ) {
                 return ExtCallOutcome::Value(0);
             }
-            sprites.set_pos(handle, x, y, z);
-            sprites.set_priority(
-                handle,
-                game_sprite_priority(slot, self.sprite_priority_cursor),
-            );
-            self.apply_pending_alpha_actions(sprites, slot, handle);
         } else {
+            if let Some(old_state) = self.game_msprites.remove(&slot) {
+                if let Some(handle) = old_state.handle {
+                    self.msprite_system.release(handle);
+                }
+            }
             let Some(handle) = sprites.create_rgba_sprite(
                 width,
                 height,
@@ -18547,6 +18619,28 @@ mod tests {
     }
 
     #[test]
+    fn sptext_draws_into_an_existing_slot_without_replacing_it() {
+        let (assets, points) = empty_core_assets(false);
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let mut sprites = SpriteSystem::new();
+        let canvas = sprites
+            .create_rgba_sprite(64, 32, vec![0; 64 * 32 * 4], PalVec3::new(5, 6, 0), 0, "canvas")
+            .unwrap();
+        vm.game_sprites.insert(3, canvas);
+        let text = vm.store_dynamic_string("A".to_owned());
+        vm.stack = vec![0, 2, 1, text, 3];
+        let outcome = vm.dispatch_extcall(
+            3, 22, &[], &assets, &points, None, Some(&mut sprites), None, None, None,
+        );
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert_eq!(vm.game_sprites.get(&3), Some(&canvas));
+        let sprite = sprites.get(canvas).unwrap();
+        assert_eq!(sprite.position, PalVec3::new(5, 6, 0));
+        let surface = sprites.surface(sprite.surface).unwrap();
+        assert_eq!((surface.width(), surface.height()), (64, 32));
+    }
+
+    #[test]
     fn chinese_text_language_selects_the_face_tagged_for_it() {
         let faces = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
         let shipped = faces(&[
@@ -19114,7 +19208,7 @@ mod tests {
     #[test]
     fn trenka_system_extensions_are_dispatched_and_others_skip() {
         let (mut assets, _) = empty_core_assets(false);
-        let indices = [50, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 72, 73, 79, 82, 83, 84, 86, 87, 108];
+        let indices = [50, 57, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 72, 73, 79, 82, 83, 84, 86, 87, 106, 107, 108];
         for build in [crate::assets::NativeBuild::Trenka, crate::assets::NativeBuild::Unknown] {
             assets.native_build = build;
             for index in indices {

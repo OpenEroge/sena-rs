@@ -1393,9 +1393,10 @@ static SIG_SP_HIDE: ExtSig = sig!(3, 47, "sp_hide", pop=1,
     evidence=[GameSqlite:"reverse/Game.sqlite sprite view-control handler", PalSqlite:"PalSpriteViewCtrl 0x1011B859 / Game import thunk 0x4503BE", RuntimeTrace:"pal-vm ext_sp_view_ctrl pops 1 (slot only)"]);
 /// category 3 index 22: sptext
 ///
-/// Purpose: Create a transparent text sprite through the PAL font/text surface
-/// path (AdvCommandSpText).  Renders a Text.dat string directly onto a named
-/// sprite slot surface.
+/// Purpose: Draw a script string through the PAL font/text surface path
+/// (AdvCommandSpText). A slot that already holds a sprite gets
+/// PalSpriteCreateTextEx, which draws over its surface at (x, y) without
+/// moving it; an empty slot gets a new transparent text sprite at (x, y).
 ///
 /// VM arguments (display order: slot, text_id, x, y, mode):
 /// - pop[0]: slot (SpriteSlot) — target sprite slot.
@@ -1417,8 +1418,8 @@ static SIG_SP_HIDE: ExtSig = sig!(3, 47, "sp_hide", pop=1,
 /// Decompiler: Blocked — renders as sptext(slot, text_id, x, y, mode).
 static SIG_SPTEXT: ExtSig = sig!(3, 22, "sptext", pop=5,
     params=["slot":0=SpriteSlot, "text_id":1=TextId, "x":2=CoordinateX, "y":3=CoordinateY, "mode":4=Mode],
-    return=Void, effects=[CreatesSprite, ChangesTextState], purpose="Create a transparent text sprite through the PAL font/text surface path.",
-    status=Blocked, decompiler=Blocked, evidence=[Writeup:"docs/writeup.md AdvCommandSpText", RuntimeTrace:"AdvCommandSpText 5-arg path"]);
+    return=Void, effects=[CreatesSprite, ChangesTextState], purpose="Draw text into the slot's existing sprite at (x, y), or create a transparent text sprite when the slot is empty.",
+    status=Blocked, decompiler=Blocked, evidence=[Writeup:"docs/writeup.md AdvCommandSpText", RuntimeTrace:"AdvCommandSpText 5-arg path", GameSqlite:"Totsulover sub_449B90 and iroha trenka 0x427520 call PalSpriteCreateTextEx for an existing wrapper"]);
 
 // Category 4/5/13 - audio.
 

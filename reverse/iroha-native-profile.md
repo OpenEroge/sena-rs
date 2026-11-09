@@ -62,6 +62,24 @@ present slot does not mean Sena implements the handler's semantics.
 - Category 18 extras: dictionary 82..87, save folder 50, append 59, global
   words 72/73/79, scene-skip query 108. INI wrappers resolve the file name
   through File.dat (0x44B500).
+- Favourite voices 18:60..68 (0x414CA0..0x4154B0): up to 0x400 records
+  (id, flag, name, voice, tag-stripped text) saved as
+  `%06d,%1d,"name","voice","text"` lines; 18:79 sets the add limit. The
+  backlog face button adds the line through 14:20 and 18:61.
+- 18:57 `strcut` (0x41B7C0) counts characters by a lead-byte walk (CR/LF
+  counts once) and cuts a longer dynamic string at byte `2 * limit` (one
+  more when that byte is not a lead byte); it returns the count. 18:106
+  forwards a byte to `PalSetPow`; 18:107 returns a dynamic string's byte
+  length.
+- 14:25 (0x42D1A0) pops enable, File.dat name, x, y. The backlog builder
+  (0x42B7A0) draws that sprite on every visible record at
+  `anchor - (row_height - height) / 2 + y`, dropping rows above the view.
+  The script passes the `[history] HISTORY_LINE_*` separator.
+- 3:32 `sp_create` (0x4267D0) pops slot, File.dat name, x, y, width,
+  height and loads the named sprite (`#AARRGGBB` becomes a width x height
+  surface). 3:22 `sp_text` (0x427520) draws into an existing wrapper with
+  `PalSpriteCreateTextEx`, which writes glyphs over the locked surface at
+  (x, y); Totsulover `sub_449B90` does the same.
 
 ## Implementation state
 
@@ -78,6 +96,9 @@ present slot does not mean Sena implements the handler's semantics.
   registered coordinates, the position layer for 3:14 and the category 18
   extras; `registered_softpal` stays off.
 - `ani.rs` runs the full motion bytecode into `PalSprite::motion_lanes`.
+- `sptext` draws into an existing slot sprite for every build (native
+  evidence from two builds); the six-operand `sp_create` and the 14:25
+  separator are gated on `NativeBuild::Trenka`.
 - `--diagnostic-realtime` paces headless frames to the wall clock. Without
   it device audio lags the VM clock and the click-sound gate on button
   reactions never clears.
@@ -91,5 +112,9 @@ present slot does not mean Sena implements the handler's semantics.
 - With `--diagnostic-realtime` and device audio, BGM, SE, system voice and
   line voice are played; SE effective volume follows the group and master
   volumes.
+- The backlog shows separator lines between records and keeps them while
+  scrolling. Clicking a face icon writes `save/favoice.dat`; EXTRA → VOICE
+  MODE then lists the entry with its face, count (001/500) and the
+  `strcut`-shortened line.
 - The dynamic gosub site was not executed within the first 2100 frames, so
   the fix is validated by native evidence and the unit test only.
