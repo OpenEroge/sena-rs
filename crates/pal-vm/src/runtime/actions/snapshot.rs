@@ -278,8 +278,11 @@ fn read_bank(reader: &mut impl Read, limit: usize) -> Result<ActionBank> {
             for _ in 0..count(reader, 2)? {
                 handles.push(SpriteHandle(read_u32_from(reader)?));
             }
+            // Mask sections are not serialized; a restored one ends without
+            // touching pixels.
             Some(RunningSection {
                 handles,
+                mask: None,
                 started_ms,
                 period_start_ms,
                 move_delta,

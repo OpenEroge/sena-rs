@@ -49,6 +49,8 @@ struct ActionSection {
 #[derive(Clone, Debug)]
 struct RunningSection {
     handles: Vec<SpriteHandle>,
+    /// Type 20 sprites: from, mask, to.
+    mask: Option<[SpriteHandle; 3]>,
     started_ms: u32,
     period_start_ms: u32,
     move_delta: f32,
@@ -93,6 +95,9 @@ fn entry_kind(index: u16) -> Option<(u8, usize)> {
         20 => (13, 5),
         21 => (14, 7),
         29 => (15, 6),
+        // trenka.exe 0x40A230 (source-rect tween) and 0x409170 (mask reveal).
+        31 => (16, 8),
+        35 => (20, 5),
         _ => return None,
     })
 }
@@ -344,7 +349,7 @@ impl ScriptRuntime {
                         line.current = None;
                         line.index += 1;
                     } else {
-                        self.evaluate_action_section(section, running, &mut temporary);
+                        self.evaluate_action_section(section, running, &mut temporary, sprites);
                         continue;
                     }
                 }
@@ -410,12 +415,24 @@ impl ScriptRuntime {
     ) -> RunningSection {
         let mut running = RunningSection {
             handles: self.action_targets(section.args.first().copied().unwrap_or(-1)),
+            mask: None,
             started_ms: self.pal_time_ms,
             period_start_ms: self.pal_time_ms,
             move_delta: 0.0,
         };
         match section.kind {
             3 => running.handles.clear(),
+            20 => {
+                running.handles.clear();
+                let target = |slot: i32| self.action_targets(slot).first().copied();
+                running.mask = match (target(section.args[0]), target(section.args[1]), target(section.args[2])) {
+                    (Some(from), Some(mask), Some(to)) => Some([from, mask, to]),
+                    _ => {
+                        log::debug!("[trace-action] mask section is missing an image {:?}", section.args);
+                        None
+                    }
+                };
+            }
             9 => {
                 running.handles.clear();
                 self.action_audio_requests.push((
@@ -527,11 +544,18 @@ impl ScriptRuntime {
         section: &ActionSection,
         running: &RunningSection,
         lanes: &mut BTreeMap<SpriteHandle, SpriteActionLanes>,
-        sprites: &SpriteSystem,
+        sprites: &mut SpriteSystem,
     ) {
         let mut delta = SpriteActionLanes::default();
         let args = &section.args;
         match section.kind {
+            16 => delta.rect = [args[2], args[3], args[4], args[5]],
+            20 => {
+                if let Some([from, mask, to]) = running.mask {
+                    sprites.apply_action_mask(from, mask, to, None);
+                }
+                return;
+            }
             0 | 7 | 8 | 15 => delta.position = [args[1] as f32, args[2] as f32, args[3] as f32],
             2 => delta.alpha = args[1] as i16,
             4 => delta.rotation = [args[1] as f32, args[2] as f32, args[3] as f32],
@@ -553,6 +577,7 @@ impl ScriptRuntime {
         section: &ActionSection,
         running: &mut RunningSection,
         lanes: &mut BTreeMap<SpriteHandle, SpriteActionLanes>,
+        sprites: &mut SpriteSystem,
     ) {
         let elapsed = self
             .pal_time_ms
@@ -622,6 +647,16 @@ impl ScriptRuntime {
                 let ratio = curve(a[1], elapsed, section.duration);
                 delta.rotation = [a[2], a[3], a[4]]
                     .map(|value| (value as f32 + if value < 0 { -0.5 } else { 0.5 }) * ratio);
+            }
+            16 => {
+                let ratio = curve(a[1], elapsed, section.duration);
+                delta.rect = [a[2], a[3], a[4], a[5]].map(|value| biased_delta(value, ratio) as i32);
+            }
+            20 => {
+                if let Some([from, mask, to]) = running.mask {
+                    sprites.apply_action_mask(from, mask, to, Some((t * 255.0) as i32 as u8));
+                }
+                return;
             }
             _ => return,
         }
@@ -805,6 +840,60 @@ mod tests {
         vm.advance_actions(&mut sprites);
         assert_eq!(sprites.get(handle).unwrap().info().position.x, 300.0);
         assert_eq!(sprites.get(handle).unwrap().info().color.alpha(), 155);
+    }
+
+    fn alphas(sprites: &SpriteSystem, handle: SpriteHandle) -> Vec<u8> {
+        let surface = sprites.surface(sprites.get(handle).unwrap().surface).unwrap();
+        surface.to_scene_texture().pixels.chunks(4).map(|pixel| pixel[3]).collect()
+    }
+
+    #[test]
+    fn mask_section_reveals_target_alpha_then_copies_the_source() {
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let mut sprites = SpriteSystem::new();
+        let pixel = |alpha: u8| [10, 20, 30, alpha];
+        let from = sprites
+            .create_rgba_sprite(3, 1, [pixel(200); 3].concat(), PalVec3::default(), 0, "from")
+            .unwrap();
+        // Blue 255/128/0 gives mask levels 0/127/255.
+        let mask_pixels = vec![0, 0, 255, 255, 0, 0, 128, 255, 0, 0, 0, 255];
+        let mask = sprites.create_rgba_sprite(3, 1, mask_pixels, PalVec3::default(), 0, "mask").unwrap();
+        let to = sprites
+            .create_rgba_sprite(3, 1, [pixel(50); 3].concat(), PalVec3::default(), 0, "to")
+            .unwrap();
+        for (slot, handle) in [(1, from), (2, mask), (3, to)] {
+            vm.game_sprites.insert(slot, handle);
+        }
+        call(&mut vm, &mut sprites, 35, &[0, 1, 2, 3, 100]);
+        call(&mut vm, &mut sprites, 0, &[0, 1000]);
+        vm.advance_actions(&mut sprites);
+        vm.set_pal_time(50);
+        vm.advance_actions(&mut sprites);
+        // p = 127, ramp end 158: below, inside ((158 - 127) * 200) >> 5, above.
+        assert_eq!(alphas(&sprites, to), [200, 193, 0]);
+        vm.set_pal_time(100);
+        vm.advance_actions(&mut sprites);
+        assert_eq!(alphas(&sprites, to), [200, 200, 200]);
+    }
+
+    #[test]
+    fn rect_section_tweens_the_source_rect_and_commits_it() {
+        let (mut vm, mut sprites, handle) = fixture();
+        call(&mut vm, &mut sprites, 31, &[0, 0, 0, 0, 0, 10, 20, 100]);
+        call(&mut vm, &mut sprites, 0, &[0, 1000]);
+        vm.advance_actions(&mut sprites);
+        vm.set_pal_time(50);
+        vm.advance_actions(&mut sprites);
+        let drawn = match sprites.get(handle).unwrap().draw_command(&sprites) {
+            Some(crate::scene::DrawCommand::Sprite(draw)) => draw.source_rect,
+            other => panic!("unexpected draw {other:?}"),
+        };
+        assert_eq!((drawn[2], drawn[3]), (1 + 5, 1 + 10));
+        vm.set_pal_time(100);
+        vm.advance_actions(&mut sprites);
+        call(&mut vm, &mut sprites, 3, &[0]);
+        let rect = sprites.get(handle).unwrap().source_rect;
+        assert_eq!((rect.right, rect.bottom), (1 + 10, 1 + 20));
     }
 
     #[test]

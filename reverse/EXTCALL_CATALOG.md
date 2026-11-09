@@ -2,7 +2,7 @@
 
 Generated from the shared Rust registry by `reverse/evidence/extcall_catalog.rs`.
 
-291 explicit coordinates and 246 automatic coordinates overlap at 170; the effective union contains **367 unique coordinates**.
+293 explicit coordinates and 246 automatic coordinates overlap at 170; the effective union contains **369 unique coordinates**.
 
 This is a registry inventory, not a complete native interface table. `Blocked` means insufficient verification, not an absent handler. `Verified` does not certify every runtime boundary. Runtime corrections and remaining gaps are recorded in [port-corrections.md](port-corrections.md).
 
@@ -11,7 +11,7 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | Blocked | 145 |
 | Partial | 77 |
 | StackDisciplineOnly | 2 |
-| Verified | 143 |
+| Verified | 145 |
 
 | Coordinate | Name | Pop | Display parameters (pop index) | Status | Source | Purpose |
 |---|---|---:|---|---|---|---|
@@ -334,6 +334,8 @@ This is a registry inventory, not a complete native interface table. `Blocked` m
 | 17:28 | `action_clear_all` | 0 |  | Partial | explicit | Apply final values and clear all action banks. |
 | 17:29 | `action_position_sine` | 6 | line_id (0, Integer), sprite_slot (1, SpriteSlot), dx (2, Integer), dy (3, Integer), dz (4, Integer), duration_ms (5, DurationMs) | Partial | explicit | Append a sine position section; the extended native build scales entry coordinates by 1.5. |
 | 17:30 | `set_action_clear` | 1 | action_id (0, Integer) | Partial | explicit | Mark the resolved action bank for deferred clearing. |
+| 17:31 | `action_rect_tween` | 8 | line_id (0, Integer), sprite_slot (1, SpriteSlot), mode (2, Mode), left (3, Integer), top (4, Integer), right (5, Integer), bottom (6, Integer), duration_ms (7, DurationMs) | Verified | explicit | Append a section that tweens the sprite source rect (type 16) with the shared easing modes. |
+| 17:35 | `action_mask` | 5 | line_id (0, Integer), from_slot (1, SpriteSlot), mask_slot (2, SpriteSlot), to_slot (3, SpriteSlot), duration_ms (4, DurationMs) | Verified | explicit | Append a section that reveals the target's alpha through a mask image (type 20). |
 | 18:1 | `app_exec` | 1 | path (0, TextStringFromTextDat) | Blocked | explicit | Open a resolved path through the OS shell; portable runtime records but does not launch. |
 | 18:3 | `string_not_equal` | 2 | lhs (0, TextStringFromTextDat), rhs (1, TextStringFromTextDat) | Verified | explicit | Case-insensitive string inequality test used by table scan loops. |
 | 18:4 | `strcatf_string` | 2 | dst (0, BufferPointer), src (1, TextStringFromTextDat) | Verified | explicit | Append resolved string to dynamic string buffer. |

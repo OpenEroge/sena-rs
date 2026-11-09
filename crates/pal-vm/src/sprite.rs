@@ -496,6 +496,56 @@ impl SpriteSystem {
         }
     }
 
+    /// Game action type 20 (trenka.exe 0x401DF0): reveal `to` through the
+    /// mask. With `threshold` p, mask level m = 255 - mask blue selects
+    /// from's alpha below p, a 32-step ramp up to p + 31, and zero above.
+    /// `None` is the completion pass (0x402010), which copies `from` whole.
+    pub fn apply_action_mask(
+        &mut self,
+        from: SpriteHandle,
+        mask: SpriteHandle,
+        to: SpriteHandle,
+        threshold: Option<u8>,
+    ) -> bool {
+        let pixels = |sprites: &Self, handle: SpriteHandle| {
+            let surface = sprites.surface(sprites.get(handle)?.surface)?;
+            Some((surface.width() as usize, surface.height() as usize, surface.to_scene_texture().pixels.to_vec()))
+        };
+        let (Some((width, height, source)), Some((mask_width, mask_height, mask_pixels))) =
+            (pixels(self, from), pixels(self, mask))
+        else {
+            return false;
+        };
+        let Some(surface_id) = self.get(to).map(|sprite| sprite.surface) else { return false; };
+        let Some(surface) = self.surfaces.get_mut(&surface_id) else { return false; };
+        let (to_width, to_height) = (surface.width() as usize, surface.height() as usize);
+        let rows = height.min(mask_height).min(to_height);
+        let columns = width.min(mask_width).min(to_width);
+        let target = surface.pixels_mut();
+        let high = threshold.map(|low| u16::from(low).saturating_add(31).min(255));
+        for y in 0..rows {
+            for x in 0..columns {
+                let src = (y * width + x) * 4;
+                let dst = (y * to_width + x) * 4;
+                let (Some(low), Some(high)) = (threshold, high) else {
+                    target[dst..dst + 4].copy_from_slice(&source[src..src + 4]);
+                    continue;
+                };
+                let level = 255 - u16::from(mask_pixels[(y * mask_width + x) * 4 + 2]);
+                let alpha = u16::from(source[src + 3]);
+                target[dst + 3] = if level < u16::from(low) {
+                    alpha as u8
+                } else if level < high {
+                    (((high - level) * alpha) >> 5) as u8
+                } else {
+                    0
+                };
+            }
+        }
+        surface.mark_dirty();
+        true
+    }
+
     pub fn motion_active(&self, handle: SpriteHandle) -> bool {
         self.ani_motions.contains_key(&handle)
     }
@@ -1950,6 +2000,9 @@ pub struct SpriteActionLanes {
     pub alpha: i16,
     /// Red, green and blue words; only motion programs animate them.
     pub rgb: [i16; 3],
+    /// Source rect left/top/right/bottom deltas (Game action type 16).
+    /// Action snapshots do not carry this lane.
+    pub rect: [i32; 4],
 }
 
 impl SpriteActionLanes {
@@ -1966,6 +2019,9 @@ impl SpriteActionLanes {
         for channel in 0..3 {
             self.rgb[channel] = self.rgb[channel].wrapping_add(other.rgb[channel]);
         }
+        for edge in 0..4 {
+            self.rect[edge] = self.rect[edge].wrapping_add(other.rect[edge]);
+        }
     }
 
     pub fn from_motion(delta: &crate::ani::MotionDelta) -> Self {
@@ -1976,6 +2032,7 @@ impl SpriteActionLanes {
             scale: delta.scale,
             alpha: delta.color[0],
             rgb: [delta.color[1], delta.color[2], delta.color[3]],
+            rect: [0; 4],
         }
     }
 }
@@ -1989,6 +2046,7 @@ impl PalSprite {
         self.scale = composed.scale;
         self.scale_y = composed.scale_y;
         self.color = composed.color;
+        self.source_rect = composed.source_rect;
     }
 
     /// Action and motion lanes that currently compose with the base state.
@@ -2029,6 +2087,15 @@ impl PalSprite {
         let channel = |shift: u32, delta: i16| {
             (i16::from((sprite.color.0 >> shift) as u8).wrapping_add(delta).clamp(0, 255) as u32) << shift
         };
+        if lanes.rect != [0; 4] {
+            let rect = sprite.source_rect;
+            sprite.source_rect = PalRect::new(
+                rect.left.wrapping_add(lanes.rect[0]),
+                rect.top.wrapping_add(lanes.rect[1]),
+                rect.right.wrapping_add(lanes.rect[2]),
+                rect.bottom.wrapping_add(lanes.rect[3]),
+            );
+        }
         sprite.color = PalColor::from_argb(
             channel(24, lanes.alpha)
                 | channel(16, lanes.rgb[0])
