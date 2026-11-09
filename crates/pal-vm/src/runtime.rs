@@ -12220,7 +12220,7 @@ impl ScriptRuntime {
             return ExtCallOutcome::Value(-1);
         };
         if let Some(sprite) = sprites.and_then(|sprites| sprites.get(handle)) {
-            let value = sprite.source_name.clone();
+            let value = registered_images::requested_sprite_name(&sprite.source_name).to_owned();
             if is_dynamic_string_handle(dst_slot) {
                 self.replace_dynamic_string(dst_slot, value);
             } else if dst_slot >= 0 {

@@ -5,6 +5,23 @@ use super::*;
 
 pub(super) const SUFFIXES: &[&str] = &[".pgd", ".mpg", ".tga", ".bmp", ".png", ".jpg"];
 
+/// Recover the name a sprite was requested with from the loaded asset name.
+/// The native record keeps the caller's string (trenka.exe 0x4250B0 copies
+/// record+0x254, and save restore at 0x40D0F4 feeds that same string back
+/// into the suffix-appending loader 0x447FA0), so the suffix appended by
+/// `load_sprite_resource` must not leak into `sp_get_filename`.
+pub(super) fn requested_sprite_name(asset_name: &str) -> &str {
+    for suffix in SUFFIXES {
+        let Some(split) = asset_name.len().checked_sub(suffix.len()) else {
+            continue;
+        };
+        if asset_name.is_char_boundary(split) && asset_name[split..].eq_ignore_ascii_case(suffix) {
+            return &asset_name[..split];
+        }
+    }
+    asset_name
+}
+
 pub(super) fn load_sprite_resource(
     manager: &mut ResourceManager,
     movies: &mut MSpriteSystem,
@@ -43,4 +60,18 @@ pub(super) fn load_sprite_resource(
         }
     }
     Err(last_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requested_sprite_name;
+
+    #[test]
+    fn requested_sprite_name_strips_one_loader_suffix() {
+        assert_eq!(requested_sprite_name("ST09D_C030.pgd"), "ST09D_C030");
+        assert_eq!(requested_sprite_name("OPENING.mpg"), "OPENING");
+        assert_eq!(requested_sprite_name("a.pgd.pgd"), "a.pgd");
+        assert_eq!(requested_sprite_name("sp_create:3"), "sp_create:3");
+        assert_eq!(requested_sprite_name("#FF000000"), "#FF000000");
+    }
 }
