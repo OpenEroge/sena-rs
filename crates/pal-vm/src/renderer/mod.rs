@@ -796,7 +796,7 @@ mod tests {
             generation: 1,
             width: 2,
             height: 1,
-            pixels: Arc::from([255, 0, 0, 255, 0, 0, 255, 255]),
+            pixels: Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 255]),
         };
         let mut smooth = [0; 4];
         draw_textured_rect(&mut smooth, 4, 1, &texture, [2.0, 1.0], &test_sprite(true));
@@ -823,7 +823,7 @@ mod tests {
             generation: 1,
             width: 2,
             height: 1,
-            pixels: Arc::from([255, 0, 0, 255, 0, 0, 255, 0]),
+            pixels: Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 0]),
         };
         let middle = sample_bilinear(&texture, 0.5, 0.0, [0, 0, 1, 0]);
         assert_eq!(&middle[..3], &[255, 0, 0]);
