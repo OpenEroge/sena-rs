@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 
 /// Exact audited PAL/Game pairs, independent of script and export capabilities.
 ///
-/// These variants name the three reviewed releases, not every release of a
-/// title or every engine revision with a similar export table.
+/// These variants name the reviewed releases, not every release of a title or
+/// every engine revision with a similar export table.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum NativeBuild {
     #[default]
@@ -15,6 +15,41 @@ pub enum NativeBuild {
     Koikake,
     Reference,
     Totsulover,
+    /// `trenka.exe` with its Reference-like PAL.dll that lacks the registered
+    /// DLL markers (reverse/evidence/iroha-trenka-interface-inventory.json).
+    Trenka,
+}
+
+/// Extcall coordinates whose native wrapper matches the registered contract
+/// even though the PAL.dll does not carry the registered markers. Each range
+/// was compared handler by handler (pop count, debug strings and PAL calls);
+/// see reverse/iroha-native-profile.md.
+const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
+    (2, 47, 47),
+    (3, 59, 59),
+    (5, 0, 14),
+    (9, 57, 57),
+    (10, 37, 39),
+    (14, 13, 19),
+    (14, 21, 24),
+    (18, 54, 54),
+    (18, 88, 89),
+    (18, 91, 91),
+    (18, 96, 99),
+];
+
+impl NativeBuild {
+    /// Whether this build's wrapper at `category:index` follows the
+    /// registered contract independently of the DLL capability markers.
+    pub fn shares_registered_extcall(self, category: u16, index: u16) -> bool {
+        let table: &[(u16, u16, u16)] = match self {
+            NativeBuild::Trenka => TRENKA_REGISTERED_EXTCALLS,
+            _ => &[],
+        };
+        table
+            .iter()
+            .any(|&(cat, first, last)| cat == category && (first..=last).contains(&index))
+    }
 }
 
 struct BinaryIdentity {
@@ -28,8 +63,9 @@ struct NativeIdentity {
     game: BinaryIdentity,
 }
 
-// Complete-file hashes from reverse/evidence/native-interface-inventory.json
-// and reverse/evidence/totsulover-interface-inventory.json. Both files must
+// Complete-file hashes from reverse/evidence/native-interface-inventory.json,
+// reverse/evidence/totsulover-interface-inventory.json and
+// reverse/evidence/iroha-trenka-interface-inventory.json. Both files must
 // match the same record: PAL exports alone cannot identify Game VM wrappers.
 const NATIVE_IDENTITIES: &[NativeIdentity] = &[
     NativeIdentity {
@@ -65,6 +101,17 @@ const NATIVE_IDENTITIES: &[NativeIdentity] = &[
             sha256: "4778fe70629a7c0ee6cb3caa30ce572cc45440ac392ea998b406ca45ec304483",
         },
     },
+    NativeIdentity {
+        build: NativeBuild::Trenka,
+        pal: BinaryIdentity {
+            size: 1_228_288,
+            sha256: "2ef61fc3d6ba354dbb9e3a4da50fe82bc20a4a2e7e0cce401ec51120dc7b8463",
+        },
+        game: BinaryIdentity {
+            size: 2_776_576,
+            sha256: "1038558f878444ad6bf8964f32651396eefb843a2f138558684b4f718dd109fd",
+        },
+    },
 ];
 
 const PAL_PATHS: &[&str] = &[
@@ -87,6 +134,11 @@ const GAME_PATHS: &[&str] = &[
     "totsulover_try.exe",
     "Totsulover_try.exe",
     "TOTSULOVER_TRY.EXE",
+    // A patched sibling executable (same size, different digest) must not be
+    // listed: any unmatched candidate makes the installation Unknown.
+    "trenka.exe",
+    "Trenka.exe",
+    "TRENKA.EXE",
 ];
 
 pub(crate) fn detect_native_build(root: &Path) -> NativeBuild {
@@ -250,6 +302,17 @@ mod tests {
         assert!(!has_export(&bytes, b"PalSystemPath"));
         bytes[0x240..0x244].copy_from_slice(&0xffff_ffffu32.to_le_bytes());
         assert!(!has_export(&bytes, b"PalSystemPathInit"));
+    }
+
+    #[test]
+    fn registered_extcall_sharing_is_limited_to_audited_coordinates() {
+        assert!(NativeBuild::Trenka.shares_registered_extcall(5, 1));
+        assert!(NativeBuild::Trenka.shares_registered_extcall(18, 97));
+        assert!(!NativeBuild::Trenka.shares_registered_extcall(18, 90));
+        assert!(!NativeBuild::Trenka.shares_registered_extcall(5, 15));
+        for build in [NativeBuild::Unknown, NativeBuild::Koikake, NativeBuild::Reference, NativeBuild::Totsulover] {
+            assert!(!build.shares_registered_extcall(5, 1));
+        }
     }
 
     #[test]

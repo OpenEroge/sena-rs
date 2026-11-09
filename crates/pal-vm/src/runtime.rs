@@ -5080,7 +5080,7 @@ impl ScriptRuntime {
         if let Some(sprites) = sprites.as_deref_mut() {
             sprites.set_registered_profile(assets.registered_softpal);
         }
-        if assets.registered_softpal {
+        if assets.registered_extcall(category, index) {
             match (category, index) {
                 (11, 8..=13) => return self.dispatch_movie_control(index, audio),
                 (2, 47) => {
@@ -7918,7 +7918,7 @@ impl ScriptRuntime {
         mut audio: Option<&mut AudioSystem>,
         input: Option<&PalInputState>,
     ) -> ExtCallOutcome {
-        if assets.registered_softpal && matches!(index, 13..=19 | 21..=24) {
+        if matches!(index, 13..=19 | 21..=24) && assets.registered_extcall(14, index) {
             return self.dispatch_history_icons(index, assets, nls, resource_manager, audio);
         }
         match index {

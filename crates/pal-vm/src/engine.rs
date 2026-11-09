@@ -249,7 +249,7 @@ impl Engine {
             if engine
                 .core_assets
                 .as_ref()
-                .is_some_and(|assets| assets.registered_softpal)
+                .is_some_and(|assets| assets.registered_se_contract())
             {
                 runtime.apply_registered_se_levels(&mut engine.audio);
             }

@@ -124,6 +124,17 @@ impl CoreAssets {
     pub fn legacy_koikake(&self) -> bool {
         self.native_build == NativeBuild::Koikake
     }
+
+    /// Whether `category:index` dispatches through the registered wrapper:
+    /// every coordinate for registered DLLs, audited ones for other builds.
+    pub fn registered_extcall(&self, category: u16, index: u16) -> bool {
+        self.registered_softpal || self.native_build.shares_registered_extcall(category, index)
+    }
+
+    /// Whether SE playback follows the registered lane/prefix contract.
+    pub fn registered_se_contract(&self) -> bool {
+        self.registered_extcall(5, 1)
+    }
 }
 
 /// Record count the multi-language probe validates before deciding. Enough to

@@ -260,7 +260,8 @@ impl ScriptRuntime {
     ) {
         let config = self.history_state.icons.config.clone();
         let mut visible = Vec::new();
-        if self.history_state.active && assets.registered_softpal {
+        // Icons exist only where the registered history icon producers do.
+        if self.history_state.active && assets.registered_extcall(14, 22) {
             let (start, end, tops) = self.history_visible_window(assets, nls);
             let cache = self.history_state.layout_cache.as_ref().unwrap();
             let [left, top, _, _] = self.history_state.rect;
