@@ -41,6 +41,8 @@ impl ScriptRuntime {
             (18, 90 | 92) => self.pop_operands(8, ExtCallOutcome::Continue),
             // 0x411F10 shows a message box; 0x411B00 only logs its operand.
             (15, 1 | 9) => self.pop_operands(1, ExtCallOutcome::Continue),
+            // 0x411B50 returns the VM stack depth for debug traces.
+            (15, 8) => ExtCallOutcome::Value(self.stack.len() as i32),
             // 0x4182C0 returns a stamp decoded from the executable image;
             // only an unreferenced point reads it.
             (18, 17) => ExtCallOutcome::Value(0),

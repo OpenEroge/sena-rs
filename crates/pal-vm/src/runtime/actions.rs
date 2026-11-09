@@ -9,6 +9,9 @@ pub(super) use snapshot::SavedActions;
 #[derive(Clone, Debug, Default)]
 pub(super) struct ActionSubsystemState {
     pub extended: bool,
+    /// The build sizes its tables like the extended profile (16 banks of 64
+    /// lines with 64 sections) without the extended scaling or skip masks.
+    pub wide_tables: bool,
     pub active_id: i32,
     pub last_duration_ms: u32,
     banks: [ActionBank; 16],
@@ -58,14 +61,14 @@ struct RunningSection {
 
 impl ActionSubsystemState {
     fn bank_count(&self) -> usize {
-        if self.extended {
+        if self.extended || self.wide_tables {
             16
         } else {
             8
         }
     }
     fn line_limit(&self) -> usize {
-        if self.extended {
+        if self.extended || self.wide_tables {
             64
         } else {
             32
@@ -103,6 +106,11 @@ fn entry_kind(index: u16) -> Option<(u8, usize)> {
 }
 
 impl ScriptRuntime {
+    /// A bank started by `action_sync_run` (mode 2) is still running.
+    pub(super) fn action_sync_run_active(&self) -> bool {
+        self.action_state.banks.iter().any(|bank| bank.mode == 2)
+    }
+
     pub(super) fn dispatch_action(
         &mut self,
         index: u16,
@@ -151,6 +159,7 @@ impl ScriptRuntime {
         }
         let mut state = std::mem::take(&mut self.action_state);
         self.action_state.extended = state.extended;
+        self.action_state.wide_tables = state.wide_tables;
         let outcome = match index {
             0..=2 | 25..=27 => {
                 let all = index >= 25;
@@ -319,6 +328,7 @@ impl ScriptRuntime {
         self.flush_deferred_action_clears(sprites);
         let mut state = std::mem::take(&mut self.action_state);
         self.action_state.extended = state.extended;
+        self.action_state.wide_tables = state.wide_tables;
         let now = self.pal_time_ms;
         let mut temporary = BTreeMap::<SpriteHandle, SpriteActionLanes>::new();
         for bank in &mut state.banks {
@@ -744,6 +754,7 @@ impl ScriptRuntime {
         }
         let mut state = std::mem::take(&mut self.action_state);
         self.action_state.extended = state.extended;
+        self.action_state.wide_tables = state.wide_tables;
         state.flush_requested = false;
         for id in 0..state.bank_count() {
             if state.clear_flags[id] {

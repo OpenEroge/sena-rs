@@ -94,7 +94,7 @@ present slot does not mean Sena implements the handler's semantics.
   9:55 `get_font_color` pops a selector (all builds), 10:29 swaps two save
   slots through `save_tmp.dat`, 18:17 pops nothing. With the small
   wrappers in `runtime/trenka_wrappers.rs` (2:35, 3:42/43, 4:5, 4:16/17,
-  8:28/30, 15:1/9, 18:43..48, 18:76, 18:109, 18:113..115) and 8:42 shared
+  8:28/30, 15:1/8/9, 18:43..48, 18:76, 18:109, 18:113..115) and 8:42 shared
   with the registered builds, every one of the 419 extcall coordinates the
   script uses pops what the native wrapper pops (18:9 wsprint pops its
   padded operands in a loop; 11:2 pops through sp_cls).
@@ -115,6 +115,32 @@ present slot does not mean Sena implements the handler's semantics.
   0xB9000-0xDE000 (points 6175-6672) and the chapter scripts, and call only
   audited generic extcalls (`sp_set_ex`, action lanes, `se_play_ex_ch`,
   `random`, `wait`). The region sets no buttons and waits for no input.
+- Script thread (21:0..3): `create_thread` (0x42F300) only records the
+  target point and sets active/running (+0x4D2324/+0x4D2328). The scheduler
+  (0x42F1E0, and the wait handler at 0x445629) pushes a type-3 call frame
+  to that point whenever the thread is running and no such call is in
+  flight (+0x4D232C); the matching `ret` (0x42D643) only decrements the
+  in-flight count. A returning body is therefore called again on the next
+  visit, including while the main script waits for a click. The visit is
+  skipped while an action bank is in a synchronous run (0x4455D9).
+- The ADV menu is that thread. Point 2367 (created at 0x42670 when
+  `mem_system[134]` is set) checks the mouse against the panel zone each
+  frame and slides the `MAIN_BTN_*` panel in or out. Lane `2*i` fades
+  button `i` and lane `2*i+1` moves it by the panel width. `mem_user[0]` is
+  the open flag. The click handler of the compact tab (index 22, point
+  2903) opens the menu only in touch mode (`mem_system[163]`, set from
+  `is_touch` and the INI). The ADV setup (0x5095C) parks every panel button
+  one panel width to the right with `sp_set_pos_move` on its packed slot
+  (`0x02000000 | index`).
+- Action tables: `set_active_action` (0x408F90) accepts banks 0..15 and the
+  section writers (`action_alpha_delta` 0x409F40 and siblings) accept lines
+  0..63 with up to 64 sections, like the extended builds; a rejected call
+  returns without popping its tail. The menu uses lanes up to 47.
+- `sp_set_pos_move` (0x428F20) resolves its slot through 0x449110, which
+  maps packed button references to the button sprite, and adds the delta
+  to the wrapper base position.
+- 15:8 (0x411B50) writes the VM stack depth to its destination and pops
+  nothing; the menu thread prints it in its debug traces.
 
 ## Implementation state
 
@@ -141,6 +167,19 @@ present slot does not mean Sena implements the handler's semantics.
 - `--diagnostic-realtime` paces headless frames to the wall clock. Without
   it device audio lags the VM clock and the click-sound gate on button
   reactions never clears.
+- A script thread whose body returns is re-armed at its point and entered
+  once per frame, also during main-script click and frame waits; it runs
+  with the main instruction budget (it used to stop at the first return and
+  ran at most 64 instructions a frame). Test:
+  `script_thread_reenters_every_frame_even_while_main_waits`.
+- `NativeBuild::wide_action_tables` gives trenka the 16x64x64 action
+  tables without the extended scaling; `sprite_slots_resolve_buttons` lets
+  3:25 move packed button slots.
+- The host-side ADV menu emulation (name-matched `MAIN_BTN_BASE0/1`, click
+  interception, quick-save alpha mirroring) is gone. Group-0 buttons follow
+  the text window and their show/hide state; `btn_enable` no longer hides a
+  button, because the panel backdrop is a disabled button that is drawn.
+  Test: `adv_toolbar_follows_text_window_and_show_state_only`.
 
 ## Runtime validation
 
@@ -162,6 +201,12 @@ present slot does not mean Sena implements the handler's semantics.
 - A 2,300,000-frame auto-advance route spends 14,137 frames in the battle
   region without an unimplemented call; captures show the view change,
   speed-line cut-ins, slash sprites and character slides.
+- ADV menu (headless, mouse moved by injected clicks): with the pointer
+  outside the zone only the `>>` tab shows; moving it onto the panel slides
+  in all buttons in their slots (BACK/NEXT, SAVE/LOAD, Q.SAVE/Q.LOAD,
+  AUTO/SKIP, LOG/SYSTEM, CLOSE/HOLD, FAVORITE, window-alpha slider) and
+  hides the tab; moving away slides them out. Q.SAVE writes `save999.dat`
+  and SYSTEM opens the system screen, with and without `--patch mai`.
 - The `mai` translation overlay is described in
   [mai-translation-patch.md](mai-translation-patch.md).
 - The dynamic gosub site was not executed within the first 2100 frames, so

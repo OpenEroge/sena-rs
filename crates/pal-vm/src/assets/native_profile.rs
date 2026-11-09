@@ -50,7 +50,7 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 /// - 3:58 `drawtext` (0x42A3F0): wrapped text into an existing sprite.
 /// - 10:29 (0x4317C0): swap two save slots through `save_tmp.dat`.
 /// - Small wrappers in `runtime/trenka_wrappers.rs`: 2:35, 3:42, 3:43, 4:5,
-///   4:16, 4:17, 8:28, 8:30, 9:48, 15:1, 15:9, 18:17, 18:43..48, 18:76,
+///   4:16, 4:17, 8:28, 8:30, 9:48, 15:1, 15:8, 15:9, 18:17, 18:43..48, 18:76,
 ///   18:90, 18:92, 18:109, 18:113..115.
 /// - 8:27 `btn_blt` (0x40FEA0), 8:31/8:32 button tips word (0x410610/0x410720).
 /// - 14:25 (0x42D1A0): per-record backlog separator sprite.
@@ -73,7 +73,7 @@ const TRENKA_OWN_EXTCALLS: &[(u16, u16, u16)] = &[
     (10, 29, 29),
     (14, 25, 25),
     (15, 1, 1),
-    (15, 9, 9),
+    (15, 8, 9),
     (18, 17, 17),
     (18, 43, 48),
     (18, 50, 50),
@@ -100,6 +100,21 @@ impl NativeBuild {
     /// trenka.exe (0x429060, "sp_set_pos_ex", +0x10..0x18 and +0x6C..0x74);
     /// the audited Game.exe handler writes the rotation layer instead.
     pub fn sprite_move_ex_sets_position(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
+    /// trenka.exe resolves sprite slots through 0x449110, which also maps
+    /// packed button references (`0x02000000 | index`) to the button sprite;
+    /// `sp_set_pos_move` (0x428F20) moves such a button like a sprite.
+    pub fn sprite_slots_resolve_buttons(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
+    /// trenka.exe sizes its action tables like the extended builds: 16 banks
+    /// (`set_active_action` 0x408F90 rejects ids above 15) of 64 lines with 64
+    /// sections each (`action_alpha_delta` 0x409F40 and its siblings check
+    /// `line <= 0x3F` and `sections < 0x40`).
+    pub fn wide_action_tables(self) -> bool {
         self == NativeBuild::Trenka
     }
 

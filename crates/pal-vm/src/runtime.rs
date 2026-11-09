@@ -520,7 +520,6 @@ pub struct ScriptRuntime {
     /// PAL button group+48: hovered button while the left mouse is held.
     button_release_capture: Option<(i32, i32)>,
     button_group_release_capture: BTreeMap<i32, i32>,
-    adv_menu_expanded: bool,
     /// Game category 12 system/menu button table.
     system_buttons: BTreeMap<i32, GameSystemButtonEntry>,
     system_button_blocked_at: Option<u32>,
@@ -1538,7 +1537,6 @@ impl ScriptRuntime {
             button_release_mode: false,
             button_release_capture: None,
             button_group_release_capture: BTreeMap::new(),
-            adv_menu_expanded: false,
             system_buttons: BTreeMap::new(),
             system_button_blocked_at: None,
             button_input_block_duration: 50,
@@ -2817,69 +2815,16 @@ impl ScriptRuntime {
                 .text_state
                 .sprite
                 .is_some_and(|handle| sprites.get(handle).is_some_and(|sprite| sprite.visible));
-        let menu_bases = self.adv_menu_bases(sprites);
-        // Some scripts leave quick-save/load at alpha zero while fading the
-        // rest of the ADV toolbar through the native button table. Mirror the
-        // live alpha of its visible peers, including when the toolbar fades
-        // away, instead of restoring those two controls to 255 every frame.
-        let inline_quick_peer_alpha = self
-            .game_buttons
-            .iter()
-            .filter(|((group, _), entry)| {
-                *group == 0
-                    && entry.visible
-                    && entry.enabled
-                    && !entry.name.eq_ignore_ascii_case("MAIN_BTN_QSAVE")
-                    && !entry.name.eq_ignore_ascii_case("MAIN_BTN_QLOAD")
-            })
-            .filter_map(|(_, entry)| sprites.get(entry.handle).map(|sprite| sprite.color.alpha()))
-            .max()
-            .unwrap_or(0);
+        // Group 0 is the ADV toolbar. Its buttons follow the text window and
+        // their own show/hide state; `btn_enable` only gates hit testing, so a
+        // disabled control (e.g. a menu panel backdrop) is still drawn. Menu
+        // slide-ins and fades are script work done by the thread callback.
         for ((group, _), entry) in self.game_buttons.iter() {
             if *group != 0 {
                 continue;
             }
-            // A paired compact/expanded base defines an ADV menu. Keep its
-            // compact button visible while the script's separate panel sprites
-            // animate, and reveal panel controls only after a menu click.
-            let inline_quick_button = menu_bases.is_none()
-                && (entry.name.eq_ignore_ascii_case("MAIN_BTN_QSAVE")
-                    || entry.name.eq_ignore_ascii_case("MAIN_BTN_QLOAD"));
-            let visible = if let Some((compact, expanded, panel_left)) = menu_bases {
-                if entry.handle == compact {
-                    chrome_visible && entry.visible && !self.adv_menu_expanded
-                } else if entry.handle == expanded {
-                    chrome_visible && entry.visible && self.adv_menu_expanded
-                } else {
-                    let on_panel = sprites
-                        .get(entry.handle)
-                        .is_some_and(|sprite| sprite.effective_position().x >= panel_left);
-                    chrome_visible
-                        && entry.visible
-                        && entry.enabled
-                        && (!on_panel || self.adv_menu_expanded)
-                }
-            } else {
-                chrome_visible && entry.visible && entry.enabled
-            };
-            let compatible_quick_alpha = inline_quick_button && entry.alpha == 0;
-            let visible = visible && (!compatible_quick_alpha || inline_quick_peer_alpha > 0);
-            let _ = sprites.view_ctrl(entry.handle, visible);
-            if compatible_quick_alpha {
-                sprites.set_alpha(entry.handle, inline_quick_peer_alpha);
-            }
+            let _ = sprites.view_ctrl(entry.handle, chrome_visible && entry.visible);
         }
-    }
-
-    fn adv_menu_bases(&self, sprites: &SpriteSystem) -> Option<(SpriteHandle, SpriteHandle, i32)> {
-        let compact = self.game_buttons.iter().find(|((group, _), entry)| {
-            *group == 0 && entry.name.eq_ignore_ascii_case("MAIN_BTN_BASE0")
-        })?.1;
-        let expanded = self.game_buttons.iter().find(|((group, _), entry)| {
-            *group == 0 && entry.name.eq_ignore_ascii_case("MAIN_BTN_BASE1")
-        })?.1;
-        let panel_left = sprites.get(expanded.handle)?.effective_position().x;
-        Some((compact.handle, expanded.handle, panel_left))
     }
 
     pub fn consume_text_reveal_push(&mut self, input: &PalInputState) -> bool {
@@ -3780,47 +3725,6 @@ impl ScriptRuntime {
         let completed_reaction = self.poll_button_reactions(audio.as_deref_mut(), input);
         let pending_reaction = self.button_reaction_pending();
         let (mouse_x, mouse_y) = input.mouse_position();
-        if input.mouse_push(PalMouseButton::Left)
-            && !self.adv_menu_expanded
-            && self.adv_menu_bases(sprites).is_some_and(|(compact, _, _)| {
-                sprites.get(compact).is_some_and(|sprite| {
-                    let pos = sprite.effective_position();
-                    sprite.visible
-                        && sprite.color.alpha() != 0
-                        && mouse_x >= pos.x
-                        && mouse_x < pos.x.saturating_add(sprite.source_rect.width())
-                        && mouse_y >= pos.y
-                        && mouse_y < pos.y.saturating_add(sprite.source_rect.height())
-                })
-            })
-        {
-            self.adv_menu_expanded = true;
-            self.sync_adv_button_chrome_visibility(sprites);
-            return ButtonInputOutcome {
-                consumed_mouse_push: true,
-                ..Default::default()
-            };
-        }
-        if input.mouse_push(PalMouseButton::Left)
-            && self.adv_menu_expanded
-            && self.adv_menu_bases(sprites).is_some_and(|(_, expanded, _)| {
-                sprites.get(expanded).is_some_and(|sprite| {
-                    let pos = sprite.effective_position();
-                    sprite.visible
-                        && mouse_x >= pos.x
-                        && mouse_x < pos.x.saturating_add(sprite.source_rect.width())
-                        && mouse_y >= pos.y
-                        && mouse_y < pos.y.saturating_add(40)
-                })
-            })
-        {
-            self.adv_menu_expanded = false;
-            self.sync_adv_button_chrome_visibility(sprites);
-            return ButtonInputOutcome {
-                consumed_mouse_push: true,
-                ..Default::default()
-            };
-        }
         // The EXE polls groups in ascending order. Overlapping groups each
         // retain hover state; the first pending physical reaction clears the
         // input snapshot before subsequent groups can react to that edge.
@@ -4024,8 +3928,20 @@ impl ScriptRuntime {
                     frame_events: Vec::new(),
                 });
             }
-            // Still waiting on a task; don't re-emit wait_request.
+            // Still waiting on a task; don't re-emit wait_request. The native
+            // wait handler still enters the script thread (trenka.exe
+            // 0x445629), which is how per-frame UI threads keep running while
+            // the story waits for a click.
             RuntimeStatus::WaitFrame { .. } | RuntimeStatus::WaitClick { .. } => {
+                self.run_script_thread(
+                    assets,
+                    resource_manager.as_deref_mut(),
+                    sprites.as_deref_mut(),
+                    task_system.as_deref_mut(),
+                    audio.as_deref_mut(),
+                    input,
+                    config,
+                )?;
                 return Ok(RuntimeTick {
                     executed: 0,
                     status: self.status.clone(),
@@ -4070,17 +3986,14 @@ impl ScriptRuntime {
             .map_err(|source| RuntimeError::ScriptParse {
                 source: source.to_string(),
             })?;
-        self.run_thread_slice(
-            &script,
-            &assets.point_table,
-            &assets.mem_dat.bytes,
+        self.run_script_thread(
             assets,
             resource_manager.as_deref_mut(),
             sprites.as_deref_mut(),
             task_system.as_deref_mut(),
             audio.as_deref_mut(),
             input,
-            config.instructions_per_frame.max(1).min(64),
+            config,
         )?;
         let mut executed = 0usize;
         let budget = config.instructions_per_frame.max(1);
@@ -4190,6 +4103,42 @@ impl ScriptRuntime {
         })
     }
 
+    /// One scheduler visit for the script thread. Native skips it while an
+    /// action bank is in a synchronous run (the wait handler branches away
+    /// at 0x4455D9 before the thread push).
+    #[allow(clippy::too_many_arguments)]
+    fn run_script_thread(
+        &mut self,
+        assets: &CoreAssets,
+        resource_manager: Option<&mut ResourceManager>,
+        sprites: Option<&mut SpriteSystem>,
+        task_system: Option<&mut TaskSystem>,
+        audio: Option<&mut AudioSystem>,
+        input: Option<&PalInputState>,
+        config: &ScriptRuntimeConfig,
+    ) -> Result<(), RuntimeError> {
+        if self.thread_state.running == 0 || self.action_sync_run_active() {
+            return Ok(());
+        }
+        let script = assets
+            .script_image()
+            .map_err(|source| RuntimeError::ScriptParse {
+                source: source.to_string(),
+            })?;
+        self.run_thread_slice(
+            &script,
+            &assets.point_table,
+            &assets.mem_dat.bytes,
+            assets,
+            resource_manager,
+            sprites,
+            task_system,
+            audio,
+            input,
+            config.instructions_per_frame.max(1),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_thread_slice(
         &mut self,
@@ -4243,6 +4192,7 @@ impl ScriptRuntime {
         self.thread_state.ticking = true;
 
         let mut stop_thread = false;
+        let mut returned = false;
         for _ in 0..budget.max(1) {
             match self.step(
                 script,
@@ -4282,11 +4232,11 @@ impl ScriptRuntime {
                     break;
                 }
                 Err(RuntimeError::ReturnStackUnderflow { pc }) => {
-                    log::debug!(
+                    log::trace!(
                         "[trace-thread] thread point={} returned at pc=0x{pc:08X}",
                         self.thread_state.last_id
                     );
-                    stop_thread = true;
+                    returned = true;
                     break;
                 }
                 Err(err) => {
@@ -4309,9 +4259,22 @@ impl ScriptRuntime {
             }
         }
 
-        if stop_thread {
-            self.thread_state.running = 0;
-            self.thread_state.target_pc = None;
+        // A thread is not a coroutine: the native scheduler (trenka.exe
+        // 0x42F1E0, Game.exe uses the same block) pushes a call to the target
+        // point whenever the thread is running and no such call is in flight,
+        // and the matching `ret` (0x42D643) only drops the in-flight count.
+        // A returning body is therefore entered again on the next frame.
+        let reentry_pc = (returned && self.thread_state.target_point > 0)
+            .then(|| point_table.resolve_target_pc(self.thread_state.target_point as u32))
+            .and_then(|resolved| resolved.ok().flatten());
+        if returned && reentry_pc.is_none() {
+            stop_thread = true;
+        }
+        if stop_thread || returned {
+            if stop_thread {
+                self.thread_state.running = 0;
+            }
+            self.thread_state.target_pc = reentry_pc;
             self.thread_state.vars.clear();
             self.thread_state.stack.clear();
             self.thread_state.argument_stack.clear();
@@ -5699,6 +5662,7 @@ impl ScriptRuntime {
             22 => self.dispatch_run_ext(index),
             17 => {
                 self.action_state.extended = assets.extended_softpal;
+                self.action_state.wide_tables = assets.native_build.wide_action_tables();
                 self.dispatch_action(index, sprites)
             }
             20 => self.dispatch_random_ext(index),
@@ -8986,7 +8950,11 @@ impl ScriptRuntime {
             }
             23 => self.ext_face_cls(sprites),
             24 => self.ext_sp_set_rect(sprites),
-            25 => self.ext_sp_set_pos_move(sprites),
+            25 => self.ext_sp_set_pos_move(
+                sprites,
+                self.input_registered_profile
+                    || assets.native_build.sprite_slots_resolve_buttons(),
+            ),
             26 => self.ext_sp_get_alpha(sprites),
             27 => self.ext_sp_get_rotate(sprites),
             28 => self.ext_sp_get_pos_to_mem(sprites),
@@ -9331,7 +9299,6 @@ impl ScriptRuntime {
         self.button_callback_hover.clear();
         self.button_groups.clear();
         self.button_push_queue.clear();
-        self.adv_menu_expanded = false;
         log::debug!("[trace-button] clear_all_buttons");
     }
 
@@ -9346,9 +9313,6 @@ impl ScriptRuntime {
         }
         let group = args[0];
         if self.button_groups.contains_key(&group) { return ExtCallOutcome::Continue; }
-        if group == 0 {
-            self.adv_menu_expanded = false;
-        }
         let normal_image = args[1];
         let hover_image = args[2];
         self.button_groups.insert(
@@ -9386,9 +9350,6 @@ impl ScriptRuntime {
         self.pending_button_reactions.retain(|&g, _| group >= 0 && g != group);
         self.button_callback_hover.retain(|&g, _| group >= 0 && g != group);
         self.button_sound_hover.retain(|&g, _| group >= 0 && g != group);
-        if group < 0 || group == 0 {
-            self.adv_menu_expanded = false;
-        }
         let keys: Vec<_> = self
             .game_buttons
             .keys()
@@ -9439,9 +9400,6 @@ impl ScriptRuntime {
         for group in hovered { self.leave_button_hover(group); }
         self.pending_button_reactions.retain(|&g, pending|
             !((group < 0 || g == group) && (index < 0 || pending.index == index)));
-        if group < 0 || (group == 0 && index < 0) {
-            self.adv_menu_expanded = false;
-        }
         let Some(sprites) = sprites else {
             self.forget_button_handles(group, index);
             return ExtCallOutcome::Value(1);
@@ -9964,6 +9922,7 @@ impl ScriptRuntime {
                 14 => {
                     for entry in self.matching_button_entries_mut(0, 14) {
                         entry.enabled = false;
+                        entry.visible = false;
                         entry.alpha = 0;
                     }
                     if let Some(sprites) = sprites {
@@ -11937,7 +11896,11 @@ impl ScriptRuntime {
         ExtCallOutcome::Value(1)
     }
 
-    fn ext_sp_set_pos_move(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+    fn ext_sp_set_pos_move(
+        &mut self,
+        sprites: Option<&mut SpriteSystem>,
+        packed_buttons: bool,
+    ) -> ExtCallOutcome {
         let args = self.pop_ext_args(4);
         let (Some(slot), Some(x), Some(y), Some(z)) = (
             args.first().copied(),
@@ -11947,10 +11910,11 @@ impl ScriptRuntime {
         ) else {
             return ExtCallOutcome::Block;
         };
-        // Newer Game.exe 0x44B900 updates the resolved wrapper's integer and
-        // float base coordinates directly. Packed button references use the
-        // same path, including while the button is still fully transparent.
-        if self.input_registered_profile {
+        // Newer Game.exe 0x44B900 and trenka.exe 0x428F20 update the resolved
+        // wrapper's integer and float base coordinates directly. Packed button
+        // references use the same path, including while the button is still
+        // fully transparent.
+        if packed_buttons {
             if let Some(key) = Self::packed_button_key(slot) {
                 if let (Some(entry), Some(sprites)) = (self.game_buttons.get_mut(&key), sprites) {
                     sprites.move_pos(entry.handle, x as f32, y as f32, z as f32);
@@ -19415,7 +19379,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_quick_buttons_follow_toolbar_alpha() {
+    fn adv_toolbar_follows_text_window_and_show_state_only() {
         let mut runtime = ScriptRuntime::boot(0, ScriptRuntimeConfig::default());
         let mut sprites = SpriteSystem::new();
         let text = sprites
@@ -19425,17 +19389,17 @@ mod tests {
         runtime.text_state.visible = true;
         runtime.text_state.sprite = Some(text);
 
-        let entry = |handle, name: &str, alpha| GameButtonEntry {
+        let entry = |handle, name: &str, visible, enabled| GameButtonEntry {
             registration_order: 0,
             native_flags: 1,
             hover_callbacks: [None; 2],
             handle,
             name: name.to_owned(),
-            visible: true,
-            enabled: true,
+            visible,
+            enabled,
             locked: false,
             toggle: 0,
-            alpha,
+            alpha: 0,
             slider_offset: 0,
             base_position: [0; 2],
             slider_position: [0; 2],
@@ -19444,49 +19408,38 @@ mod tests {
             anim_resource: None,
             anim_play_flag: 0,
         };
-        let peer = sprites
-            .create_rgba_sprite(
-                2,
-                2,
-                vec![255; 16],
-                PalVec3::new(0, 0, 0),
-                BUTTON_RENDER_PRIORITY,
-                "save",
-            )
-            .unwrap();
-        let quick = sprites
-            .create_rgba_sprite(
-                2,
-                2,
-                vec![255; 16],
-                PalVec3::new(0, 0, 0),
-                BUTTON_RENDER_PRIORITY,
-                "quick save",
-            )
-            .unwrap();
-        sprites.set_alpha(quick, 0);
-        runtime
-            .game_buttons
-            .insert((0, 5), entry(peer, "MAIN_BTN_SAVE", 255));
-        runtime
-            .game_buttons
-            .insert((0, 7), entry(quick, "MAIN_BTN_QSAVE", 0));
+        let sprite = |sprites: &mut SpriteSystem, name| {
+            sprites
+                .create_rgba_sprite(
+                    2,
+                    2,
+                    vec![255; 16],
+                    PalVec3::new(0, 0, 0),
+                    BUTTON_RENDER_PRIORITY,
+                    name,
+                )
+                .unwrap()
+        };
+        let backdrop = sprite(&mut sprites, "backdrop");
+        let hidden = sprite(&mut sprites, "hidden");
+        let faded = sprite(&mut sprites, "faded");
+        sprites.set_alpha(faded, 0);
+        runtime.game_buttons.insert((0, 1), entry(backdrop, "base", true, false));
+        runtime.game_buttons.insert((0, 2), entry(hidden, "hidden", false, true));
+        runtime.game_buttons.insert((0, 3), entry(faded, "faded", true, true));
 
+        // A disabled button is still drawn; only btn_hide removes one. Alpha
+        // is the script's (menu fades run in its thread), never restored here.
         runtime.sync_adv_button_chrome_visibility(&mut sprites);
-        assert!(sprites.get(quick).unwrap().visible);
-        assert_eq!(sprites.get(quick).unwrap().color.alpha(), 255);
+        assert!(sprites.get(backdrop).unwrap().visible);
+        assert!(!sprites.get(hidden).unwrap().visible);
+        assert!(sprites.get(faded).unwrap().visible);
+        assert_eq!(sprites.get(faded).unwrap().color.alpha(), 0);
 
-        sprites.set_alpha(peer, 0);
-        runtime.game_buttons.get_mut(&(0, 5)).unwrap().alpha = 0;
+        runtime.text_state.visible = false;
         runtime.sync_adv_button_chrome_visibility(&mut sprites);
-        assert!(!sprites.get(quick).unwrap().visible);
-        assert_eq!(sprites.get(quick).unwrap().color.alpha(), 0);
-
-        sprites.set_alpha(peer, 128);
-        runtime.game_buttons.get_mut(&(0, 5)).unwrap().alpha = 128;
-        runtime.sync_adv_button_chrome_visibility(&mut sprites);
-        assert!(sprites.get(quick).unwrap().visible);
-        assert_eq!(sprites.get(quick).unwrap().color.alpha(), 128);
+        assert!(!sprites.get(backdrop).unwrap().visible);
+        assert!(!sprites.get(faded).unwrap().visible);
     }
 
     #[test]
@@ -19833,6 +19786,39 @@ mod tests {
         vm.resolve_pending_wait();
         vm.run_frame(&assets, &config).unwrap();
         assert!(matches!(vm.status, RuntimeStatus::Halted { pc: 24 }));
+    }
+
+    #[test]
+    fn script_thread_reenters_every_frame_even_while_main_waits() {
+        let (mut assets, _) = empty_core_assets(false);
+        // Thread body at the first code word: user_mem[362] += 1; ret.
+        let words: [u32; 7] = [0x10001, 0x4000_0000, 362, 0x10002, 0x1000_0000, 1, 0x10018];
+        assets.script.bytes = [b"Sv20".as_slice(), &0u32.to_le_bytes(), &12u32.to_le_bytes()]
+            .concat()
+            .into_iter()
+            .chain(words.iter().flat_map(|word| word.to_le_bytes()))
+            .collect();
+        // Point 1 -> SCRIPT_CODE_BASE + 0.
+        assets.point_table = PointTable::parse(&0u32.to_le_bytes()).unwrap();
+        let config = ScriptRuntimeConfig::default();
+        let mut vm = ScriptRuntime::boot(12, config.clone());
+        vm.stack.push(1);
+        assert!(matches!(
+            vm.dispatch_thread_stub(0, &assets.point_table),
+            ExtCallOutcome::Value(1)
+        ));
+        vm.status = RuntimeStatus::WaitClick { pc: 12 };
+        for frame in 1..=3 {
+            vm.run_frame(&assets, &config).unwrap();
+            assert_eq!(vm.user_mem[362], frame, "thread body runs once per frame");
+        }
+        // A suspended thread is not entered; resuming starts the body again.
+        vm.thread_state.running = 0;
+        vm.run_frame(&assets, &config).unwrap();
+        assert_eq!(vm.user_mem[362], 3);
+        vm.thread_state.running = 1;
+        vm.run_frame(&assets, &config).unwrap();
+        assert_eq!(vm.user_mem[362], 4);
     }
 
     #[test]
