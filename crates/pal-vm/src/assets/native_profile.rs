@@ -38,44 +38,60 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
     (18, 96, 99),
 ];
 
+/// Extcall coordinates where trenka.exe has its own audited wrapper: a new
+/// coordinate or a different operand contract from the registered builds.
+/// - 3:32 `sp_create` (0x4267D0): slot, File.dat name, x, y, width, height.
+/// - 3:58 `drawtext` (0x42A3F0): wrapped text into an existing sprite.
+/// - 8:27 `btn_blt` (0x40FEA0), 8:31/8:32 button tips word (0x410610/0x410720).
+/// - 14:25 (0x42D1A0): per-record backlog separator sprite.
+/// - 18:50, 57, 59..68, 72, 73, 79, 82..87, 106..108: dictionary table,
+///   save-folder and string helpers, favourite voices with their global word
+///   table, the texture-allocation hint and the scene-skip query.
+const TRENKA_OWN_EXTCALLS: &[(u16, u16, u16)] = &[
+    (3, 32, 32),
+    (3, 58, 58),
+    (8, 27, 27),
+    (8, 31, 32),
+    (14, 25, 25),
+    (18, 50, 50),
+    (18, 57, 57),
+    (18, 59, 68),
+    (18, 72, 73),
+    (18, 79, 79),
+    (18, 82, 87),
+    (18, 106, 108),
+];
+
+fn table_contains(table: &[(u16, u16, u16)], category: u16, index: u16) -> bool {
+    table
+        .iter()
+        .any(|&(cat, first, last)| cat == category && (first..=last).contains(&index))
+}
+
 impl NativeBuild {
-    /// Sprite category 3 index 14 writes the wrapper position layer in
-    /// trenka.exe (0x429060, "sp_set_pos_ex", +0x10..0x18); the audited
-    /// Game.exe handler writes the rotation layer instead.
-    pub fn sprite_pos_ex_layer(self) -> bool {
+    /// Sprite category 3 index 14 writes the wrapper base position in
+    /// trenka.exe (0x429060, "sp_set_pos_ex", +0x10..0x18 and +0x6C..0x74);
+    /// the audited Game.exe handler writes the rotation layer instead.
+    pub fn sprite_move_ex_sets_position(self) -> bool {
         self == NativeBuild::Trenka
     }
 
-    /// trenka.exe defines extra category 18 wrappers: the dictionary table,
-    /// save-folder and string helpers (strcut, dynamic strlen), favourite
-    /// voices with their global word table, the texture-allocation hint and
-    /// the scene-skip query (18:50, 57, 59, 60..68, 72, 73, 79, 82..87,
-    /// 106..108).
-    pub fn defines_system_extensions(self) -> bool {
-        self == NativeBuild::Trenka
-    }
-
-    /// trenka.exe's 3:32 creates a sprite from a File.dat name with an
-    /// explicit position and size (six operands) instead of an empty wrapper.
-    pub fn sprite_create_from_resource(self) -> bool {
-        self == NativeBuild::Trenka
-    }
-
-    /// trenka.exe adds 14:25, a per-record separator sprite in the backlog.
-    pub fn history_separator_line(self) -> bool {
-        self == NativeBuild::Trenka
+    /// Whether this build's own audited wrapper at `category:index` should be
+    /// dispatched (see `TRENKA_OWN_EXTCALLS`).
+    pub fn defines_extcall(self, category: u16, index: u16) -> bool {
+        match self {
+            NativeBuild::Trenka => table_contains(TRENKA_OWN_EXTCALLS, category, index),
+            _ => false,
+        }
     }
 
     /// Whether this build's wrapper at `category:index` follows the
     /// registered contract independently of the DLL capability markers.
     pub fn shares_registered_extcall(self, category: u16, index: u16) -> bool {
-        let table: &[(u16, u16, u16)] = match self {
-            NativeBuild::Trenka => TRENKA_REGISTERED_EXTCALLS,
-            _ => &[],
-        };
-        table
-            .iter()
-            .any(|&(cat, first, last)| cat == category && (first..=last).contains(&index))
+        match self {
+            NativeBuild::Trenka => table_contains(TRENKA_REGISTERED_EXTCALLS, category, index),
+            _ => false,
+        }
     }
 }
 

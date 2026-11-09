@@ -486,16 +486,6 @@ impl SpriteSystem {
         true
     }
 
-    pub fn set_position_ex(&mut self, handle: SpriteHandle, x: i32, y: i32, z: i32) -> bool {
-        match self.sprites.get_mut(&handle) {
-            Some(sprite) => {
-                sprite.position_ex = [x as f32, y as f32, z as f32];
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Game action type 20 (trenka.exe 0x401DF0): reveal `to` through the
     /// mask. With `threshold` p, mask level m = 255 - mask blue selects
     /// from's alpha below p, a 32-step ramp up to p + 31, and zero above.
@@ -1986,9 +1976,6 @@ pub struct PalSprite {
     pub action_lanes: SpriteActionLanes,
     /// Motion program (`.ani`) lanes: committed plus in-flight deltas.
     pub motion_lanes: SpriteActionLanes,
-    /// Script-owned position layer that some Game builds keep beside the
-    /// base position (trenka.exe `sp_set_pos_ex`, wrapper +0x10..0x18).
-    pub position_ex: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2053,16 +2040,12 @@ impl PalSprite {
     pub fn combined_lanes(&self) -> SpriteActionLanes {
         let mut lanes = self.action_lanes;
         lanes.add(self.motion_lanes);
-        for axis in 0..3 {
-            lanes.position[axis] += self.position_ex[axis];
-        }
         lanes
     }
 
     fn has_lanes(&self) -> bool {
         self.action_lanes != SpriteActionLanes::default()
             || self.motion_lanes != SpriteActionLanes::default()
-            || self.position_ex != [0.0; 3]
     }
 
     fn with_action_lanes_applied(&self) -> Self {
@@ -2073,7 +2056,6 @@ impl PalSprite {
         let mut sprite = self.clone();
         sprite.action_lanes = SpriteActionLanes::default();
         sprite.motion_lanes = SpriteActionLanes::default();
-        sprite.position_ex = [0.0; 3];
         sprite.position.x += lanes.position[0] + lanes.shake[0];
         sprite.position.y += lanes.position[1] + lanes.shake[1];
         sprite.position.z += lanes.position[2];
@@ -2142,7 +2124,6 @@ impl PalSprite {
             smooth_upscale: desc.smooth_upscale,
             action_lanes: SpriteActionLanes::default(),
             motion_lanes: SpriteActionLanes::default(),
-            position_ex: [0.0; 3],
         }
     }
 

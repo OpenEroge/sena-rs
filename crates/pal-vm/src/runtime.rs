@@ -494,6 +494,8 @@ pub struct ScriptRuntime {
     pending_msp_wait_slot: Option<i32>,
     /// Game button entries keyed by (button group, entry index).
     game_buttons: BTreeMap<(i32, i32), GameButtonEntry>,
+    /// trenka 8:31 words kept per button record (TIPS window entry ids).
+    button_tips: BTreeMap<(i32, i32), i32>,
     next_button_registration: u64,
     /// Native `btn_init` group records: normal/hover resource ids plus the
     /// current onmouse index returned by category 8 index 23.
@@ -1516,6 +1518,7 @@ impl ScriptRuntime {
             game_msprites: BTreeMap::new(),
             pending_msp_wait_slot: None,
             game_buttons: BTreeMap::new(),
+            button_tips: BTreeMap::new(),
             next_button_registration: 1,
             button_groups: BTreeMap::new(),
             button_push_queue: BTreeMap::new(),
@@ -3131,13 +3134,15 @@ impl ScriptRuntime {
         }
     }
 
+    /// Body and name with their inline markup intact: the renderer parses the
+    /// directives itself and the tips layout needs the `<dN>..</d>` spans.
     fn adv_text_parts_for_render(&self, assets: &CoreAssets, nls: Nls) -> (String, String) {
-        let body = self
-            .resolved_dialog_text_arg(self.text_body_value(), assets, nls)
-            .unwrap_or_default();
-        let name = self
-            .resolved_dialog_text_arg(self.text_name_value(), assets, nls)
-            .unwrap_or_default();
+        let markup = |value| {
+            self.resolved_dialog_text_arg(value, assets, nls)?;
+            Some(self.resolve_script_string(value, assets, nls)?.trim().to_owned())
+        };
+        let body = markup(self.text_body_value()).unwrap_or_default();
+        let name = markup(self.text_name_value()).unwrap_or_default();
         (body, name)
     }
 
@@ -6740,6 +6745,10 @@ impl ScriptRuntime {
             25 => return self.ext_btn_get_offmouse(),
             26 => return self.ext_btn_onmouse_clear(),
             29 => return self.ext_btn_set_state(sprites),
+            27 if assets.native_build.defines_extcall(8, 27) => return self.ext_btn_blt(sprites),
+            31 | 32 if assets.native_build.defines_extcall(8, index) => {
+                return self.ext_btn_tips(index == 31)
+            }
             36 => {
                 let args = self.pop_ext_args(1);
                 let Some(mode) = args.first() else {
@@ -7927,7 +7936,7 @@ impl ScriptRuntime {
     ) -> ExtCallOutcome {
         let icon_wrapper = match index {
             13..=19 | 21..=24 => assets.registered_extcall(14, index),
-            25 => assets.native_build.history_separator_line(),
+            25 => assets.native_build.defines_extcall(14, 25),
             _ => false,
         };
         if icon_wrapper {
@@ -8819,6 +8828,9 @@ impl ScriptRuntime {
             20 => self.ext_face_set(assets, nls, resource_manager, sprites),
             21 => self.ext_sp_get_color(sprites),
             22 => self.ext_sp_text(assets, nls, sprites),
+            58 if assets.native_build.defines_extcall(3, 58) => {
+                self.ext_draw_text(assets, nls, sprites)
+            }
             23 => self.ext_face_cls(sprites),
             24 => self.ext_sp_set_rect(sprites),
             25 => self.ext_sp_set_pos_move(sprites),
@@ -8828,7 +8840,7 @@ impl ScriptRuntime {
             29 => self.ext_sp_get_dimension(sprites, true),
             30 => self.ext_sp_get_dimension(sprites, false),
             31 => self.ext_sp_surface_image(assets, nls, resource_manager, sprites),
-            32 if assets.native_build.sprite_create_from_resource() => {
+            32 if assets.native_build.defines_extcall(3, 32) => {
                 self.ext_sp_create_from_resource(assets, nls, resource_manager, sprites)
             }
             32 => self.ext_sp_create(sprites),
@@ -9024,6 +9036,92 @@ impl ScriptRuntime {
                 );
             }
         }
+        self.register_game_button(args, handle, name.clone(), sprites);
+        log::debug!(
+            "[trace-button] btn_set group={group} index={index} name={name:?} asset={source_name:?} size={log_size} entry_flag={entry_flag}",
+        );
+        ExtCallOutcome::Value(1)
+    }
+
+    /// trenka 8:27 `btn_blt` (0x40FEA0) pops group, index, sprite slot, the
+    /// three btn_set callbacks, entry flags, two unused words and the cell
+    /// width and height. The slot sprite is copied into a new button sprite at
+    /// the slot's position and used as a sheet of `width x height` states.
+    fn ext_btn_blt(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+        let args = self.pop_ext_args(11);
+        if args.len() < 11 {
+            return ExtCallOutcome::Block;
+        }
+        let (group, index, slot) = (args[0], args[1], args[2]);
+        let (cell_width, cell_height) = (args[9], args[10]);
+        if !(0..=16).contains(&group) || !(0..=128).contains(&index) {
+            return ExtCallOutcome::Value(0);
+        }
+        let (Some(sprites), Some(source)) = (sprites, self.game_sprites.get(&slot).copied()) else {
+            return ExtCallOutcome::Value(0);
+        };
+        let Some((width, height, position, pixels)) = sprites.get(source).and_then(|sprite| {
+            let texture = sprites.surface(sprite.surface)?.to_scene_texture();
+            Some((texture.width, texture.height, sprite.position, texture.pixels.to_vec()))
+        }) else {
+            return ExtCallOutcome::Value(0);
+        };
+        if let Some(old) = self.game_buttons.remove(&(group, index)) {
+            sprites.release(old.handle);
+        }
+        let surface_id = sprites.allocate_surface_id();
+        let Ok(surface) = SpriteSurface::rgba8(surface_id, 1, width, height, pixels) else {
+            return ExtCallOutcome::Value(0);
+        };
+        sprites.insert_surface(surface);
+        let mut desc = SpriteDesc::new(SceneTextureId(surface_id.0), width, height);
+        desc.cell_width = cell_width.clamp(1, width as i32) as u32;
+        desc.cell_height = cell_height.clamp(1, height as i32) as u32;
+        desc.position = position;
+        desc.visible = true;
+        desc.base_priority = button_render_priority(index, self.sprite_priority_cursor);
+        desc.source_name = format!("btn_blt:{slot}");
+        let handle = sprites.create(desc);
+        let callbacks = [group, index, slot, args[3], args[4], args[5], args[6]];
+        self.register_game_button(&callbacks, handle, format!("btn_blt:{slot}"), sprites);
+        log::debug!(
+            "[trace-button] btn_blt group={group} index={index} slot={slot} cell={cell_width}x{cell_height}"
+        );
+        ExtCallOutcome::Value(1)
+    }
+
+    /// trenka 8:31/8:32 (0x410610/0x410720) store and read one word in the
+    /// button record (+0x4C); the TIPS window keeps its entry id there.
+    fn ext_btn_tips(&mut self, set: bool) -> ExtCallOutcome {
+        let args = self.pop_ext_args(if set { 3 } else { 2 });
+        let (Some(&group), Some(&index)) = (args.first(), args.get(1)) else {
+            return ExtCallOutcome::Block;
+        };
+        if !(0..=16).contains(&group) || !(0..=128).contains(&index) {
+            return ExtCallOutcome::Value(0);
+        }
+        if set {
+            let Some(&value) = args.get(2) else {
+                return ExtCallOutcome::Block;
+            };
+            self.button_tips.insert((group, index), value);
+            ExtCallOutcome::Value(1)
+        } else {
+            ExtCallOutcome::Value(self.button_tips.get(&(group, index)).copied().unwrap_or(0))
+        }
+    }
+
+    /// Record a created button sprite under `(group, index)` with the btn_set
+    /// operand layout: `args[3]` is the click gosub point, `args[4..6]` the
+    /// hover callbacks and `args[6]` the native entry flags.
+    fn register_game_button(
+        &mut self,
+        args: &[i32],
+        handle: SpriteHandle,
+        name: String,
+        sprites: &SpriteSystem,
+    ) {
+        let (group, index, entry_flag) = (args[0], args[1], args[6]);
         // args[3] is the script callback point invoked as a gosub when this button is clicked.
         let gosub_point = args.get(3).copied().filter(|&v| v > 0).map(|v| v as u32);
         let registration_order = self.next_button_registration;
@@ -9035,7 +9133,7 @@ impl ScriptRuntime {
                 native_flags: entry_flag as u32,
                 hover_callbacks: [args[4], args[5]].map(|v| (v > 0).then_some(v as u32)),
                 handle,
-                name: name.clone(),
+                name,
                 visible: true,
                 enabled: true,
                 locked: self.button_groups.get(&group).is_some_and(|group| group.locked),
@@ -9050,10 +9148,6 @@ impl ScriptRuntime {
                 anim_play_flag: 0,
             },
         );
-        log::debug!(
-            "[trace-button] btn_set group={group} index={index} name={name:?} asset={source_name:?} size={log_size} entry_flag={entry_flag} gosub_point={gosub_point:?}",
-        );
-        ExtCallOutcome::Value(1)
     }
 
     /// Release every registered button group and its sprites. Scripts re-run
@@ -10900,6 +10994,53 @@ impl ScriptRuntime {
         ExtCallOutcome::Value(1)
     }
 
+    /// trenka 3:58 `drawtext` (0x42A3F0) pops slot, text, x, y and an unused
+    /// mode. A slot that holds a sprite gets the text typeset into it at
+    /// (x, y) by the message-window renderer (0x43CC30, shared with the
+    /// backlog): text_init font size, wrap width and line pitch, the current
+    /// font colour. An empty slot is left alone.
+    fn ext_draw_text(
+        &mut self,
+        assets: &CoreAssets,
+        nls: Nls,
+        sprites: Option<&mut SpriteSystem>,
+    ) -> ExtCallOutcome {
+        let args = self.pop_ext_args(5);
+        let [slot, text_value, x, y, _mode] = args[..] else {
+            return ExtCallOutcome::Block;
+        };
+        if !(-1..=128).contains(&slot) {
+            return ExtCallOutcome::Value(0);
+        }
+        let (Some(sprites), Some(handle)) = (sprites, self.game_sprites.get(&slot).copied()) else {
+            return ExtCallOutcome::Value(1);
+        };
+        let text = self
+            .resolve_script_string(text_value, assets, nls)
+            .unwrap_or_default();
+        let (text, _) = parse_pal_text_directives(&text);
+        let (font_size, wrap_width, pitch, ..) = self.history_typeset_params();
+        let saved_size = self.font_state.font_size();
+        self.font_state.set_font_size(font_size);
+        let lines = wrap_text_lines(&self.font_state, &text, wrap_width);
+        for (index, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let (width, height, rgba) = self.font_state.rasterize(line);
+            let line_y = y.wrapping_add(pitch.wrapping_mul(index as i32));
+            sprites.composite_rgba_to_sprite(
+                handle, x, line_y, width, height, &rgba, 0, 0, width, height,
+            );
+        }
+        self.font_state.set_font_size(saved_size);
+        log::debug!(
+            "[trace-sprite] drawtext slot={slot} lines={} at=({x}, {y}) pitch={pitch}",
+            lines.len()
+        );
+        ExtCallOutcome::Value(1)
+    }
+
     fn ext_sp_text(
         &mut self,
         assets: &CoreAssets,
@@ -11574,9 +11715,9 @@ impl ScriptRuntime {
 
     /// Category 3 index 14. Game.sqlite handler `sub_427E90` writes the
     /// wrapper rotation lanes (`wrapper[10..12]`, float lanes `33..35`);
-    /// trenka.exe 0x429060 ("sp_set_pos_ex") writes the position layer
-    /// (`wrapper[4..6]`, float lanes `27..29`) instead. The layer is
-    /// absolute and composes with the base position.
+    /// trenka.exe 0x429060 ("sp_set_pos_ex") writes the base position
+    /// (`wrapper[4..6]`, float lanes `27..29`), the fields sp_create and
+    /// 3:4 set, so it behaves as an absolute move.
     fn ext_sp_move_ex(&mut self, assets: &CoreAssets, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
         let args = self.pop_ext_args(4);
         let (Some(slot), Some(x), Some(y), Some(z)) = (
@@ -11592,8 +11733,8 @@ impl ScriptRuntime {
             self.pc
         );
         if let (Some(handle), Some(sprites)) = (self.game_sprites.get(&slot).copied(), sprites) {
-            if assets.native_build.sprite_pos_ex_layer() {
-                sprites.set_position_ex(handle, x, y, z);
+            if assets.native_build.sprite_move_ex_sets_position() {
+                sprites.set_pos(handle, x, y, z);
             } else {
                 sprites.set_rotate_ex(handle, x as f32, y as f32, z as f32);
             }
@@ -17620,25 +17761,39 @@ fn rasterize_text_block_with_layout(
     height: u32,
 ) -> (u32, u32, Vec<u8>, Vec<AdvTextLineLayout>) {
     let line_gap = (u32::from(font.font_size()).max(12) / 4).max(4);
+    let rasters: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let (_, layout_height) = font.measure(line);
+            let raster = if line.is_empty() {
+                (0, 0, Vec::new())
+            } else {
+                font.rasterize(line)
+            };
+            (layout_height, raster)
+        })
+        .collect();
+    // A line advances by its taller measure, so size the block from the same
+    // advances; the measured height alone can clip the last line's glyphs.
+    let advances_height = rasters
+        .iter()
+        .map(|(layout_height, (_, line_height, _))| (*layout_height).max(*line_height).max(1))
+        .sum::<u32>()
+        .saturating_add(line_gap.saturating_mul(lines.len().saturating_sub(1) as u32));
     let width = width.max(1);
-    let height = height.max(1);
+    let height = height.max(advances_height).max(1);
     let mut rgba = vec![0_u8; (width * height * 4) as usize];
     let mut y = 0_u32;
     let mut char_start = 0_usize;
     let mut layouts = Vec::with_capacity(lines.len());
-    for (index, line) in lines.iter().enumerate() {
+    for (index, (line, (layout_height, raster))) in lines.iter().zip(rasters).enumerate() {
         if index > 0 {
             y = y.saturating_add(line_gap);
         }
         let line_y = y;
         let units = font.layout_units(line);
         let char_count = units.iter().filter(|(_, visible)| *visible).count();
-        let (_, layout_height) = font.measure(line);
-        let (line_width, line_height, line_rgba) = if line.is_empty() {
-            (0, 0, Vec::new())
-        } else {
-            font.rasterize(line)
-        };
+        let (line_width, line_height, line_rgba) = raster;
         for sy in 0..line_height {
             for sx in 0..line_width {
                 let si = ((sy * line_width + sx) * 4) as usize;
@@ -18638,6 +18793,34 @@ mod tests {
         assert_eq!(sprite.position, PalVec3::new(5, 6, 0));
         let surface = sprites.surface(sprite.surface).unwrap();
         assert_eq!((surface.width(), surface.height()), (64, 32));
+    }
+
+    #[test]
+    fn trenka_button_tips_words_round_trip_and_other_builds_skip() {
+        let (mut assets, points) = empty_core_assets(false);
+        assets.native_build = crate::assets::NativeBuild::Trenka;
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.stack = vec![42, 3, 8];
+        let set = vm.dispatch_extcall(8, 31, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(set, ExtCallOutcome::Value(1));
+        vm.stack = vec![3, 8];
+        let get = vm.dispatch_extcall(8, 32, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(get, ExtCallOutcome::Value(42));
+        assert!(vm.stack.is_empty());
+        assets.native_build = crate::assets::NativeBuild::Unknown;
+        vm.stack = vec![3, 8];
+        let skipped = vm.dispatch_extcall(8, 32, &[], &assets, &points, None, None, None, None, None);
+        assert_ne!(skipped, ExtCallOutcome::Value(42));
+    }
+
+    #[test]
+    fn adv_render_body_keeps_tips_markup() {
+        let (assets, _) = empty_core_assets(false);
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        let body = vm.store_dynamic_string(" a<br><d7>word</d> ".to_owned());
+        vm.text_state.last_text_args[1] = body;
+        let (rendered, _) = vm.adv_text_parts_for_render(&assets, Nls::ShiftJis);
+        assert_eq!(rendered, "a<br><d7>word</d>");
     }
 
     #[test]

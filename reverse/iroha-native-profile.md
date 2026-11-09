@@ -56,7 +56,8 @@ present slot does not mean Sena implements the handler's semantics.
   0x446FE0/0x447060, clear 0x447180, tasks 0x402FF0..0x404440.
 - Action section types 16 (rect tween, 17:31) and 20 (mask reveal,
   17:35); per-type callback tables at 0x625EE8/0x625F40/0x625FA0/0x626000.
-- 3:14 writes the wrapper position layer (+0x10..0x18), not rotation.
+- 3:14 writes the wrapper base position (+0x10..0x18, floats +0x6C..0x74),
+  the fields sp_create sets, not rotation: an absolute move.
 - Save labels (10:13/10:16/10:6) apply the save font block via 0x42F420 and
   wrap to the 10:15 rect (0x431C30).
 - Category 18 extras: dictionary 82..87, save folder 50, append 59, global
@@ -80,6 +81,17 @@ present slot does not mean Sena implements the handler's semantics.
   surface). 3:22 `sp_text` (0x427520) draws into an existing wrapper with
   `PalSpriteCreateTextEx`, which writes glyphs over the locked surface at
   (x, y); Totsulover `sub_449B90` does the same.
+- 3:58 `drawtext` (0x42A3F0) pops slot, text, x, y, mode and typesets the
+  text into an existing sprite with the message-window renderer 0x43CC30
+  (text_init font size, wrap width and pitch; also used by the backlog).
+- 8:27 `btn_blt` (0x40FEA0) pops group, index, sprite slot, three btn_set
+  callbacks, entry flags, two unused words, cell width and height; it
+  copies the slot sprite into a new button at the slot position. 8:31/8:32
+  store and read a word at button record +0x4C (TIPS entry id).
+- In-game TIPS: text `<dN>..</d>` spans become records; the per-tick
+  callback lays a `btn_blt` button over each word (normal/hover/pressed
+  drawn with `drawtext`), and clicking it opens the small TIPS window.
+  Point 2233 registers the entry silently only while scene skip is active.
 
 ## Implementation state
 
@@ -97,8 +109,12 @@ present slot does not mean Sena implements the handler's semantics.
   extras; `registered_softpal` stays off.
 - `ani.rs` runs the full motion bytecode into `PalSprite::motion_lanes`.
 - `sptext` draws into an existing slot sprite for every build (native
-  evidence from two builds); the six-operand `sp_create` and the 14:25
-  separator are gated on `NativeBuild::Trenka`.
+  evidence from two builds). trenka-only wrappers are listed in
+  `TRENKA_OWN_EXTCALLS` and dispatched through `NativeBuild::defines_extcall`.
+- The ADV renderer receives the body with its inline markup; the resolver
+  used to strip `<d>` spans before the tips layout could see them, so no
+  tips record was ever produced. The text block height now follows the
+  per-line advances, so the last of three lines is no longer clipped.
 - `--diagnostic-realtime` paces headless frames to the wall clock. Without
   it device audio lags the VM clock and the click-sound gate on button
   reactions never clears.
@@ -116,5 +132,9 @@ present slot does not mean Sena implements the handler's semantics.
   scrolling. Clicking a face icon writes `save/favoice.dat`; EXTRA → VOICE
   MODE then lists the entry with its face, count (001/500) and the
   `strcut`-shortened line.
+- The first TIPS word of the common route (about frame 28440 with
+  auto-advance) is highlighted; clicking it opens the TIPS window at
+  (8, 334) with title and explanation. EXTRA → TIPS lists entries and
+  shows their detail text.
 - The dynamic gosub site was not executed within the first 2100 frames, so
   the fix is validated by native evidence and the unit test only.

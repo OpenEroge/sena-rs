@@ -184,7 +184,7 @@ impl ScriptRuntime {
         nls: Nls,
         resource_manager: Option<&mut ResourceManager>,
     ) -> ExtCallOutcome {
-        if !assets.native_build.defines_system_extensions() {
+        if !assets.native_build.defines_extcall(18, index) {
             return ExtCallOutcome::Skip;
         }
         match index {

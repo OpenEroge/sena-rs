@@ -63,6 +63,7 @@ impl ScriptRuntime {
         self.pending_gosub_points
             .push_back(self.tips_state.callbacks[0]);
         self.tips_state.flag = 1;
+        log::trace!("[trace-tips] tick point={}", self.tips_state.callbacks[0]);
         true
     }
 
@@ -87,6 +88,12 @@ impl ScriptRuntime {
             self.font_state.font_size(),
         );
         self.activate_tips_records(false);
+        log::debug!(
+            "[trace-tips] captured records={} mode=0x{:04X} callbacks={:?}",
+            self.tips_state.pending_records.len(),
+            self.tips_state.mode,
+            self.tips_state.callbacks
+        );
     }
 
     pub(super) fn activate_tips_records(&mut self, complete: bool) {
