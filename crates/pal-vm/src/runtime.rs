@@ -1838,6 +1838,16 @@ impl ScriptRuntime {
         }
     }
 
+    /// Native system.dat state: savesystemdata (10:25) and engine shutdown
+    /// (trenka.exe 0x404720 calls 0x44CC20/0x44C720) both write it. The
+    /// portable form is system.ini, the system_mem bank and read lines.
+    pub(crate) fn persist_system_data(&self, root: &Path) -> std::io::Result<()> {
+        self.write_portable_system_data(root)?;
+        self.write_portable_system_mem(root)?;
+        self.write_portable_read_lines(root)?;
+        Ok(())
+    }
+
     fn write_portable_system_mem(&self, root: &Path) -> std::io::Result<PathBuf> {
         let path = portable_system_mem_path(root);
         if let Some(parent) = path.parent() {
@@ -7171,21 +7181,8 @@ impl ScriptRuntime {
             25 => {
                 self.pop_ext_args(0);
                 if let Some(manager) = resource_manager.as_deref() {
-                    if let Err(err) = self.write_portable_system_data(manager.root()) {
+                    if let Err(err) = self.persist_system_data(manager.root()) {
                         log::warn!("[trace-save] savesystemdata failed: {err}");
-                        return ExtCallOutcome::Value(0);
-                    }
-                    // The native engine also persists its global system state
-                    // (system.dat) here; sena-rs writes the system_mem bank that
-                    // holds the script-side global settings.
-                    if let Err(err) = self.write_portable_system_mem(manager.root()) {
-                        log::warn!("[trace-save] savesystemdata system_mem failed: {err}");
-                        return ExtCallOutcome::Value(0);
-                    }
-                    // The read-text bitmap is part of the native system.dat
-                    // state as well (koikake.exe 0x438F00).
-                    if let Err(err) = self.write_portable_read_lines(manager.root()) {
-                        log::warn!("[trace-save] savesystemdata read lines failed: {err}");
                         return ExtCallOutcome::Value(0);
                     }
                 }

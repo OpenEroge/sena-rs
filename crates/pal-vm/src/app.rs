@@ -332,6 +332,8 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
         write_scene_png(&frame.scene, path)?;
         eprintln!("[headless] wrote diagnostic png {}", path.display());
     }
+    // A headless run ends like a native exit, which saves system data.
+    engine.shutdown();
     Ok(())
 }
 

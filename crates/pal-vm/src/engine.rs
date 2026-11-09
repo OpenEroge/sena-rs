@@ -425,12 +425,22 @@ impl Engine {
         self.input.begin_frame();
     }
 
+    /// Persist system data the way native shutdown does. Safe to call more
+    /// than once.
+    pub fn shutdown(&mut self) {
+        if let (Some(runtime), Some(manager)) = (self.runtime.as_ref(), self.resource_manager.as_ref()) {
+            if let Err(err) = runtime.persist_system_data(manager.root()) {
+                log::warn!("[trace-save] shutdown system data failed: {err}");
+            }
+        }
+    }
+
     pub fn handle_event(&mut self, event: PalEvent) {
         match event {
             PalEvent::Input(ref input_event) => {
                 self.input.handle_input_event(input_event);
             }
-            PalEvent::CloseRequested => {}
+            PalEvent::CloseRequested => self.shutdown(),
             PalEvent::Focused { focused } => {
                 if let Some(runtime) = self.runtime.as_mut() {
                     runtime.set_host_active(focused);
