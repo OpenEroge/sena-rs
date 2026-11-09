@@ -68,6 +68,9 @@ pub struct PalFontSystem {
     /// own TrueType faces draws text from those faces, and the bitmap font it
     /// carries alongside is the original one.
     bitmap_text_enabled: bool,
+    /// A translation patch draws every string with its outline face: it
+    /// rewrites PalFontSetType(4), the bitmap-font type, to 1.
+    outline_text_only: bool,
     begun: bool,
     font_size: u16,
     font_type: u16,
@@ -97,6 +100,7 @@ impl PalFontSystem {
             profile: PalFontProfile::Koikake,
             font_nls: Nls::ShiftJis,
             bitmap_text_enabled: true,
+            outline_text_only: false,
             begun: false,
             font_size: 28,
             font_type: 1,
@@ -173,6 +177,7 @@ impl PalFontSystem {
 
     /// Preserve the native 32-bit comparison before storing its low 16 bits.
     pub fn set_type_word(&mut self, font_type: i32) -> bool {
+        let font_type = if self.outline_text_only && font_type == 4 { 1 } else { font_type };
         if font_type == 4 {
             if self.profile == PalFontProfile::LocalizedReference {
                 self.font_type = 1;
@@ -304,6 +309,16 @@ impl PalFontSystem {
     /// engine.
     pub fn set_bitmap_text_enabled(&mut self, enabled: bool) {
         self.bitmap_text_enabled = enabled;
+    }
+
+    /// mai.dll 0x10003880 hooks PalFontSetType and turns type 4 into 1, so
+    /// the original bitmap font, which lacks the translation's glyphs, never
+    /// draws text. A type 4 already in effect is rewritten the same way.
+    pub fn set_outline_text_only(&mut self, enabled: bool) {
+        self.outline_text_only = enabled;
+        if enabled && self.font_type == 4 {
+            self.font_type = 1;
+        }
     }
 
     fn layout_font_size(&self) -> u16 {
@@ -592,6 +607,22 @@ fn glyph_baseline_shift(min_y: i32, max_y: i32, ascent: f32, cell_height: f32) -
     (baseline_bottom - (max_y - 1)).clamp(0, (cell_height * 0.1).ceil() as i32)
 }
 
+/// Host faces standing in for SimHei, the face a `mai` translation patch
+/// forces on every text font (mai.dll 0x10004580, GB2312_CHARSET). Heiti
+/// faces come first; pan-CJK faces at least cover the simplified glyphs.
+pub const SIMHEI_SUBSTITUTE_CANDIDATES: &[&str] = &[
+    "C:/Windows/Fonts/simhei.ttf",
+    "/Library/Fonts/SimHei.ttf",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+];
+
 const SYSTEM_CJK_FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/Library/Fonts/Arial Unicode.ttf",
@@ -752,6 +783,22 @@ mod tests {
             (9, -2)
         );
         assert!(glyph.coverage.is_empty());
+    }
+
+    #[test]
+    fn outline_only_rewrites_the_bitmap_font_type() {
+        let mut font = PalFontSystem::new();
+        font.load_named_bitmap_font("default_font", fixture(24, 12, 4, 0, &[64; 8]), Nls::ShiftJis)
+            .unwrap();
+        assert!(font.set_type_word(4));
+        assert_eq!(font.font_type(), 4);
+        font.set_outline_text_only(true);
+        assert_eq!(font.font_type(), 1);
+        assert!(font.set_type_word(4));
+        assert_eq!(font.font_type(), 1);
+        assert!(font.set_type_word(2));
+        assert_eq!(font.font_type(), 2);
+        assert!(font.bitmap("A").is_none());
     }
 
     #[test]

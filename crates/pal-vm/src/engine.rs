@@ -1,11 +1,13 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use pal_asset::{Nls, ResourceManager};
+use pal_asset::{MaiPatch, Nls, ResourceManager};
 
 use crate::assets::CoreAssets;
 use crate::audio::{AudioConfig, AudioHandle, AudioSystem, PalSoundGroup};
-use crate::config::{ini_graphics_size, parse_system_ini, EngineStartupConfig, TextLang};
+use crate::config::{
+    ini_graphics_size, parse_system_ini, EngineStartupConfig, TextLang, TranslationPatch,
+};
 use crate::debug::{collect_frame_dump, pal_debug_enabled, pal_debug_frame_enabled, print_dump};
 use crate::effect::SceneTransition;
 use crate::event::PalEvent;
@@ -40,6 +42,9 @@ pub struct EngineConfig {
     /// TrueType face used as the text fallback instead of the auto-discovered
     /// `fonts/*.ttf` of the game root.
     pub font_file: Option<PathBuf>,
+    /// Fan-translation overlay applied on top of the game root. Applying it
+    /// replaces `nls` with the charset the patch defines.
+    pub patch: Option<TranslationPatch>,
     pub script_runtime: ScriptRuntimeConfig,
     pub audio: AudioConfig,
     pub trace: TraceConfig,
@@ -52,6 +57,7 @@ impl Default for EngineConfig {
             nls: Nls::ShiftJis,
             lang: TextLang::Jp,
             font_file: None,
+            patch: None,
             script_runtime: ScriptRuntimeConfig::default(),
             audio: AudioConfig::default(),
             trace: TraceConfig::default(),
@@ -108,7 +114,7 @@ impl Engine {
         }
     }
 
-    pub fn new(config: EngineConfig) -> anyhow::Result<Self> {
+    pub fn new(mut config: EngineConfig) -> anyhow::Result<Self> {
         #[cfg(any(feature="nfs",feature="smb"))]
         if game_network::fs::is_remote(config.game_root.as_deref().unwrap_or(std::path::Path::new(""))) {
             game_network::fs::user_root(config.game_root.as_deref().unwrap_or(std::path::Path::new("")))?.ok_or_else(||anyhow::anyhow!("network runtime requires an explicit local user root"))?;
@@ -117,6 +123,14 @@ impl Engine {
         let (startup_config, resource_manager, core_assets, runtime, last_runtime_status) =
             match &config.game_root {
                 Some(root) => {
+                    let patch = match config.patch {
+                        Some(kind) => {
+                            let patch = open_translation_patch(root, kind)?;
+                            config.nls = Nls::Mai(patch.charset());
+                            Some(patch)
+                        }
+                        None => None,
+                    };
                     let mut startup_config = EngineStartupConfig::load(root, config.nls)?;
                     let mut resource_manager = ResourceManager::bootstrap_with_path_order(
                         root,
@@ -124,6 +138,9 @@ impl Engine {
                         config.lang.archive_list(),
                         crate::assets::native_profile::has_registered_dispatch_exports(root),
                     )?;
+                    if let Some(patch) = patch {
+                        resource_manager.set_mai_patch(patch);
+                    }
                     // Releases that keep the whole PAL payload inside data.pac
                     // ship no loose SYSTEM.INI, so the logical size, font type
                     // and font names come from the archived copy. The loose
@@ -144,10 +161,13 @@ impl Engine {
                             Err(err) => log::debug!("no loose or archived SYSTEM.INI: {err}"),
                         }
                     }
-                    let core_assets = CoreAssets::load(
+                    let mut core_assets = CoreAssets::load(
                         &mut resource_manager,
                         startup_config.system_dat.as_ref(),
                     )?;
+                    if let Some(text) = resource_manager.mai_patch().and_then(MaiPatch::text) {
+                        core_assets.apply_text_patch(text);
+                    }
                     log::info!(
                         "loaded PAL assets: script_check=0x{:08X}, entry=0x{:08X}, points={}, \
                          file_dat=0x{:X}, text_dat=0x{:X}, mem_dat=0x{:X}, graphic_entries={}",
@@ -182,6 +202,9 @@ impl Engine {
                         config.lang,
                         core_assets.text_dat_multilingual,
                     );
+                    if config.patch.is_some() {
+                        runtime.apply_translation_font_policy();
+                    }
                     // Initialise the writable Mem.dat shadow used by MemDatDirect writes.
                     runtime.load_mem_dat(&core_assets.mem_dat.bytes);
                     runtime.load_portable_system_data(root);
@@ -1111,4 +1134,18 @@ impl FrameClock {
             elapsed,
         }
     }
+}
+
+fn open_translation_patch(root: &Path, kind: TranslationPatch) -> anyhow::Result<MaiPatch> {
+    let dir = root.join(kind.directory());
+    let patch = MaiPatch::open(&dir)
+        .map_err(|err| anyhow::anyhow!("translation patch {}: {err}", dir.display()))?;
+    log::info!(
+        "translation patch {}: {} files, {} images, {} text records",
+        dir.display(),
+        patch.file_count(),
+        patch.image_count(),
+        patch.text().map_or(0, |text| text.len())
+    );
+    Ok(patch)
 }

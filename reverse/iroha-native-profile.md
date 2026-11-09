@@ -109,6 +109,12 @@ present slot does not mean Sena implements the handler's semantics.
   callback lays a `btn_blt` button over each word (normal/hover/pressed
   drawn with `drawtext`), and clicking it opens the small TIPS window.
   Point 2233 registers the entry silently only while scene skip is active.
+- Battles are script presentations, not an executable subsystem. The
+  `battle.pac` names (cut-ins, `SLASH_*`, `VIEWCHANGE_*`, `SE99_BA_*`) occur
+  only in `FILE.DAT`, never in `trenka.exe`. Their script users are in
+  0xB9000-0xDE000 (points 6175-6672) and the chapter scripts, and call only
+  audited generic extcalls (`sp_set_ex`, action lanes, `se_play_ex_ch`,
+  `random`, `wait`). The region sets no buttons and waits for no input.
 
 ## Implementation state
 
@@ -153,5 +159,10 @@ present slot does not mean Sena implements the handler's semantics.
   auto-advance) is highlighted; clicking it opens the TIPS window at
   (8, 334) with title and explanation. EXTRA → TIPS lists entries and
   shows their detail text.
+- A 2,300,000-frame auto-advance route spends 14,137 frames in the battle
+  region without an unimplemented call; captures show the view change,
+  speed-line cut-ins, slash sprites and character slides.
+- The `mai` translation overlay is described in
+  [mai-translation-patch.md](mai-translation-patch.md).
 - The dynamic gosub site was not executed within the first 2100 frames, so
   the fix is validated by native evidence and the unit test only.

@@ -45,6 +45,7 @@ mod tests {
             registered_softpal: false,
                 point_table: points.clone(),
                 graphic_index: None,
+                text_patch: None,
             },
             points,
         )

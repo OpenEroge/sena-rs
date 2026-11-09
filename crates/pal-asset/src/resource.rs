@@ -5,6 +5,7 @@ use crate::archive_dat::{parse_archive_dat_paths, parse_archive_dat_profile};
 use crate::decrypt::decrypt_pal_dollar_file;
 use crate::error::{AssetError, Result};
 use crate::key::{make_pac_key, PacKey};
+use crate::mai::MaiPatch;
 use crate::nls::Nls;
 use crate::pac::PacArchive;
 use crate::vfs;
@@ -30,6 +31,7 @@ pub struct ResourceManager {
     pacs: HashMap<PathBuf, PacArchive>,
     language_archive: Option<String>,
     last_path_wins: bool,
+    patch: Option<MaiPatch>,
 }
 
 impl ResourceManager {
@@ -41,6 +43,7 @@ impl ResourceManager {
             pacs: HashMap::new(),
             language_archive: None,
             last_path_wins: false,
+            patch: None,
         }
     }
 
@@ -168,7 +171,32 @@ impl ResourceManager {
         Ok(())
     }
 
+    /// Apply a `mai` translation patch: its `chg` files shadow every search
+    /// path, and [`Self::replacement_image`] exposes its sprite pixels.
+    pub fn set_mai_patch(&mut self, patch: MaiPatch) {
+        self.patch = Some(patch);
+    }
+
+    pub fn mai_patch(&self) -> Option<&MaiPatch> {
+        self.patch.as_ref()
+    }
+
+    /// PNG bytes the patch supplies for the image loaded as `name`.
+    pub fn replacement_image(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        match self.patch.as_ref().and_then(|patch| patch.replacement_image(name)) {
+            Some(path) => vfs::read_all(path).map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub fn open(&mut self, name: &str) -> Result<LoadedAsset> {
+        if let Some(path) = self.patch.as_ref().and_then(|patch| patch.replacement_file(name)) {
+            return Ok(LoadedAsset {
+                name: name.to_owned(),
+                bytes: vfs::read_all(path)?,
+                source: AssetSource::Loose { path: path.to_path_buf() },
+            });
+        }
         let key = make_pac_key(name, self.nls)?;
 
         let mut paths = self.paths.clone();

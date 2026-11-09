@@ -215,6 +215,7 @@ mod tests {
             registered_softpal: false,
             point_table: PointTable::parse(&[]).unwrap(),
             graphic_index: None,
+            text_patch: None,
         }
     }
 

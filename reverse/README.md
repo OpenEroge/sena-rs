@@ -21,6 +21,8 @@ Current runtime corrections and remaining gaps: [port-corrections.md](port-corre
 Latest implementation: [native action banks and save version 11](action-scheduler.md),
 [PalEffectEx scene transitions](scene-transitions.md), and
 [VM dispatch and raster FX](fx-vm-implementation.md).
+Per-build notes: [Iroha native profile](iroha-native-profile.md) and the
+[`mai` translation patch](mai-translation-patch.md) it can carry.
 Native primary aliases and wait operands are corrected; raster lifecycle now
 reaches CPU, wgpu, and Switch deko3d drawing. The [Vita follow-up](vita-precompiled-rendering.md)
 adds ordinary GXM drawing with precompiled programs and no shader-compiler

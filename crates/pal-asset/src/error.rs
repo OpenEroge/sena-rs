@@ -55,6 +55,9 @@ pub enum AssetError {
         name: String,
         len: usize,
     },
+    InvalidMaiPatch {
+        reason: String,
+    },
     Vfs {
         path: PathBuf,
         reason: String,
@@ -132,6 +135,7 @@ impl fmt::Display for AssetError {
                 "encrypted PAL file {} is too short: {} bytes, expected at least 0x10",
                 name, len
             ),
+            Self::InvalidMaiPatch { reason } => write!(f, "invalid mai patch: {}", reason),
             Self::Vfs { path, reason } => {
                 write!(
                     f,

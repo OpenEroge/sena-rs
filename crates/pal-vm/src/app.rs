@@ -10,7 +10,7 @@ use winit::keyboard::Key;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::AudioConfig;
-use crate::config::TextLang;
+use crate::config::{TextLang, TranslationPatch};
 use crate::engine::{Engine, EngineConfig, TraceConfig};
 use crate::event::{InputEvent, MouseButton, PalEvent};
 use crate::platform_time::{Duration, Instant};
@@ -30,6 +30,8 @@ pub struct SenaConfig {
     /// TrueType face used as the text fallback instead of the auto-discovered
     /// `fonts/*.ttf` of the game root.
     pub font_file: Option<PathBuf>,
+    /// Fan-translation overlay applied on top of the game root.
+    pub patch: Option<TranslationPatch>,
     pub title: String,
     pub width: u32,
     pub height: u32,
@@ -114,6 +116,7 @@ impl Default for SenaConfig {
             nls: Nls::ShiftJis,
             lang: TextLang::Jp,
             font_file: None,
+            patch: None,
             title: "sena".to_owned(),
             width: FrameScene::PAL_DEFAULT_WIDTH,
             height: FrameScene::PAL_DEFAULT_HEIGHT,
@@ -891,6 +894,7 @@ pub(crate) fn build_engine(config: &SenaConfig) -> anyhow::Result<Engine> {
         nls: config.nls,
         lang: config.lang,
         font_file: config.font_file.clone(),
+        patch: config.patch,
         script_runtime: ScriptRuntimeConfig {
             instructions_per_frame: config.script_budget_per_frame,
             trace: config.trace_script,

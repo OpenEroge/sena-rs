@@ -5,7 +5,7 @@ use pal_asset::Nls;
 use pal_vm::{
     run_sena, AudioConfig, DiagnosticAutoAdvance, DiagnosticClick, DiagnosticClickWhenHitEnabled,
     DiagnosticKeyEvent, DiagnosticPngAt, DiagnosticWheelEvent, FrameScene, MouseButton,
-    ScriptRuntimeConfig, SenaConfig, TextLang,
+    ScriptRuntimeConfig, SenaConfig, TextLang, TranslationPatch,
 };
 
 #[derive(Debug, Parser)]
@@ -33,6 +33,13 @@ struct Args {
     /// text language, the first by path otherwise.
     #[arg(long)]
     font_file: Option<PathBuf>,
+
+    /// Apply a fan-translation overlay that the game root carries. `mai`
+    /// reads the `mai/` directory used by a proxy `mai.dll`: replacement text,
+    /// images and files, a remapped Shift-JIS charset (which overrides
+    /// `--nls`), and SimHei text drawn by a host face.
+    #[arg(long)]
+    patch: Option<TranslationPatch>,
 
     #[arg(long, default_value_t = FrameScene::PAL_DEFAULT_WIDTH)]
     width: u32,
@@ -189,6 +196,7 @@ fn main() -> anyhow::Result<()> {
         nls: args.nls,
         lang: args.lang,
         font_file: args.font_file,
+        patch: args.patch,
         title: args.title,
         width: args.width,
         height: args.height,

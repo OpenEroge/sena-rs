@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use pal_asset::{LoadedAsset, ResourceManager};
+use pal_asset::{LoadedAsset, MaiText, ResourceManager};
 use pal_script::{PointTable, ScriptImage};
 
 use crate::config::SystemDat;
@@ -34,6 +34,8 @@ pub struct CoreAssets {
     pub registered_softpal: bool,
     pub point_table: PointTable,
     pub graphic_index: Option<GraphicIndex>,
+    /// Replacement records of a translation patch, see [`Self::apply_text_patch`].
+    pub text_patch: Option<TextPatch>,
 }
 
 impl CoreAssets {
@@ -112,7 +114,25 @@ impl CoreAssets {
             registered_softpal,
             point_table,
             graphic_index,
+            text_patch: None,
         })
+    }
+
+    /// Replace `text_dat` records with a patch's records of the same id.
+    /// Only the single-language table carries the ids such a patch keys on.
+    pub fn apply_text_patch(&mut self, patch: &MaiText) {
+        if self.text_dat_multilingual {
+            log::warn!("translation patch text ignored: Text.dat uses the multi-language layout");
+            return;
+        }
+        let text_patch = TextPatch::build(&self.text_dat.bytes, patch);
+        log::info!("translation patch replaces {} Text.dat records", text_patch.len());
+        self.text_patch = Some(text_patch);
+    }
+
+    /// Patched bytes of the `text_dat` record at `offset`, without its id.
+    pub fn patched_text_record(&self, offset: usize) -> Option<&[u8]> {
+        self.text_patch.as_ref()?.record(offset)
     }
 
     pub fn script_image(&self) -> anyhow::Result<ScriptImage<'_>> {
@@ -524,6 +544,42 @@ fn normalize_graphic_name(name: &mut [u8; 64]) {
 mod tests {
     use super::*;
 
+    fn text_table(records: &[(u32, &[u8])]) -> Vec<u8> {
+        let mut bytes = b"$TEXT_LIST__".to_vec();
+        bytes.extend_from_slice(&(records.len() as u32).to_le_bytes());
+        for (id, text) in records {
+            bytes.extend_from_slice(&id.to_le_bytes());
+            bytes.extend_from_slice(text);
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn text_patch_maps_record_offsets_by_id_and_keeps_reserved_records() {
+        let text_dat = text_table(&[(3, b"face"), (7, b"line"), (9, b"kept")]);
+        let patch: MaiText = [(3, b"FACE".to_vec()), (7, b"LINE!".to_vec()), (8, b"none".to_vec())]
+            .into_iter()
+            .collect();
+        let text_patch = TextPatch::build(&text_dat, &patch);
+        assert_eq!(text_patch.len(), 1);
+        // Record 3 sits at 0x10, record 7 after its 4-byte id and "face\0".
+        assert_eq!(text_patch.record(0x10), None);
+        assert_eq!(text_patch.record(0x19), Some(&b"LINE!"[..]));
+        // Offsets inside a record never resolve.
+        assert_eq!(text_patch.record(0x1D), None);
+    }
+
+    #[test]
+    fn text_patch_stops_at_a_truncated_table() {
+        let mut text_dat = text_table(&[(5, b"one"), (6, b"two")]);
+        text_dat.truncate(text_dat.len() - 2);
+        let patch: MaiText = [(5, b"1".to_vec()), (6, b"2".to_vec())].into_iter().collect();
+        let text_patch = TextPatch::build(&text_dat, &patch);
+        assert_eq!(text_patch.record(0x10), Some(&b"1"[..]));
+        assert_eq!(text_patch.len(), 1);
+    }
+
     #[test]
     fn graphic_record_lanes_follow_flag_bits() {
         let mut bytes =
@@ -564,4 +620,45 @@ fn graphic_c_string(bytes: &[u8]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&bytes[..end]).to_string())
+}
+
+/// Translation-patch records keyed by the offset of the original `Text.dat`
+/// record they replace. Scripts address text by offset while the patch keys
+/// its own table by record id, so only real record starts are mapped.
+#[derive(Debug, Default)]
+pub struct TextPatch {
+    records: HashMap<usize, Vec<u8>>,
+}
+
+impl TextPatch {
+    pub fn build(text_dat: &[u8], patch: &MaiText) -> Self {
+        let mut records = HashMap::new();
+        let count = text_dat
+            .get(12..16)
+            .map_or(0, |bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        let mut offset = 0x10;
+        for _ in 0..count {
+            let Some(header) = text_dat.get(offset..offset + 4) else { break };
+            let id = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            let start = offset + 4;
+            let Some(len) = text_dat[start..].iter().position(|&byte| byte == 0) else { break };
+            if let Some(replacement) = patch.record(id) {
+                records.insert(offset, replacement.to_vec());
+            }
+            offset = start + len + 1;
+        }
+        Self { records }
+    }
+
+    pub fn record(&self, offset: usize) -> Option<&[u8]> {
+        self.records.get(&offset).map(Vec::as_slice)
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
 }

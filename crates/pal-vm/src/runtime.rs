@@ -20,7 +20,7 @@ use crate::config::{
     ini_graphics_size, parse_system_ini, IniFile, IniValue, TextLang, TEXT_FIELD_SEPARATOR,
 };
 use crate::effect::PalEffectSystem;
-use crate::font::{PalFontProfile, PalFontSystem};
+use crate::font::{PalFontProfile, PalFontSystem, SIMHEI_SUBSTITUTE_CANDIDATES};
 use crate::image::{decode_image, decode_image_with_resolver, DecodedImage};
 use crate::input::{PalInputState, PalKey, PalMouseButton};
 use crate::msprite::{MSpriteHandle, MSpriteSystem, MSPRITE_STATE_FINISHED};
@@ -65,6 +65,8 @@ use primary_aliases::primary_extcall;
 mod registered_primary_aliases;
 #[cfg(test)]
 mod registered_tests;
+#[cfg(test)]
+mod translation_patch_tests;
 
 fn primary_extcall_for_profile(opcode: u16, registered: bool) -> Option<(u16, u16)> {
     if registered {
@@ -1719,6 +1721,27 @@ impl ScriptRuntime {
             self.style_faces_enabled = self.font_face_candidates.len() > 1;
         }
         self.ensure_wait_mark_sheet(resource_manager);
+    }
+
+    /// Apply the font hooks of a `mai` translation patch: text never uses the
+    /// bitmap font, and the outline face is SimHei. A face chosen with
+    /// `--font-file` or shipped in the game's `fonts/` stays; otherwise the
+    /// first host stand-in for SimHei is loaded.
+    pub fn apply_translation_font_policy(&mut self) {
+        self.font_state.set_outline_text_only(true);
+        if self.loaded_face_path.is_none() {
+            let face = SIMHEI_SUBSTITUTE_CANDIDATES
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| pal_asset::vfs::is_file(path));
+            if face.is_none() {
+                log::warn!(
+                    "no SimHei stand-in found; translated text may miss glyphs (pass --font-file)"
+                );
+            }
+            self.load_face(face);
+        }
+        self.invalidate_text_layout();
     }
 
     /// Load `path` as the text face, remembering it as the active one.
@@ -15918,6 +15941,16 @@ impl ScriptRuntime {
         args
     }
 
+    /// The `Text.dat` record at `offset`, as a translation patch replaces it
+    /// (mai.dll 0x10003F60 hooks the engine's record reader the same way).
+    fn text_dat_record(&self, assets: &CoreAssets, offset: usize, nls: Nls) -> Option<String> {
+        if let Some(bytes) = assets.patched_text_record(offset) {
+            return nls.decode(bytes).ok();
+        }
+        read_text_record_string(&assets.text_dat.bytes, offset, nls, assets.text_dat_multilingual)
+            .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
+    }
+
     fn resolve_script_string(&self, value: i32, assets: &CoreAssets, nls: Nls) -> Option<String> {
         if value == 0x0FFF_FFFF {
             return Some(String::new());
@@ -15926,14 +15959,8 @@ impl ScriptRuntime {
             return self.dynamic_strings.get(index).cloned();
         }
         let offset = value.try_into().ok()?;
-        read_text_record_string(
-            &assets.text_dat.bytes,
-            offset,
-            nls,
-            assets.text_dat_multilingual,
-        )
-        .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
-        .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
+        self.text_dat_record(assets, offset, nls)
+            .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
         .or_else(|| read_c_string(&assets.file_dat.bytes, offset, nls))
     }
 
@@ -15952,14 +15979,8 @@ impl ScriptRuntime {
                     .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
-                read_text_record_string(
-                    &assets.text_dat.bytes,
-                    offset,
-                    nls,
-                    assets.text_dat_multilingual,
-                )
-                .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
-                .filter(|value| is_plausible_resource_name(value))
+                self.text_dat_record(assets, offset, nls)
+                    .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
                 read_c_string(&assets.text_dat.bytes, offset, nls)
@@ -16686,7 +16707,42 @@ fn decode_asset_image(
     let mut resolver = |name: &str| -> anyhow::Result<Vec<u8>> {
         Ok(open_resource_variant(resource_manager, name, IMAGE_EXTENSIONS)?.bytes)
     };
-    decode_image_with_resolver(&asset.bytes, &mut resolver)
+    let mut decoded = decode_image_with_resolver(&asset.bytes, &mut resolver)?;
+    apply_replacement_pixels(resource_manager, &asset.name, &mut decoded);
+    Ok(decoded)
+}
+
+/// mai.dll 0x100038A0: after PalSpriteLoad succeeds, a translation patch
+/// copies its PNG over the sprite texture and keeps the original placement.
+/// The copy assumes equal dimensions; a mismatched PNG would overrun the
+/// texture there, so it is rejected here and the original pixels stay.
+fn apply_replacement_pixels(
+    resource_manager: &ResourceManager,
+    name: &str,
+    decoded: &mut DecodedImage,
+) {
+    let replacement = match resource_manager.replacement_image(name) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(err) => {
+            log::warn!("[trace-assets] patch image for {name:?} is unreadable: {err}");
+            return;
+        }
+    };
+    match decode_image(&replacement) {
+        Ok(image) if (image.width, image.height) == (decoded.width, decoded.height) => {
+            log::debug!("[trace-assets] patch image replaces {name:?}");
+            decoded.rgba = image.rgba;
+        }
+        Ok(image) => log::warn!(
+            "[trace-assets] patch image for {name:?} is {}x{}, the original is {}x{}; kept the original",
+            image.width,
+            image.height,
+            decoded.width,
+            decoded.height
+        ),
+        Err(err) => log::warn!("[trace-assets] patch image for {name:?} does not decode: {err}"),
+    }
 }
 
 fn is_resource_clear_sentinel(name: &str) -> bool {
@@ -19622,6 +19678,7 @@ mod tests {
             registered_softpal: false,
             point_table: points.clone(),
             graphic_index: None,
+            text_patch: None,
         };
         let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
         runtime.stack.push(42);
@@ -19874,6 +19931,7 @@ mod tests {
             registered_softpal: false,
             point_table: points.clone(),
             graphic_index: None,
+            text_patch: None,
         };
         (assets, points)
     }
@@ -20963,6 +21021,7 @@ mod tests {
             registered_softpal: false,
             point_table: PointTable::parse(&[]).expect("empty Point.dat should parse"),
             graphic_index: None,
+            text_patch: None,
         };
 
         let snapshot = runtime

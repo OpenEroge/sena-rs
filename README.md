@@ -35,5 +35,13 @@ controls, artifacts, and validation limits. Console hardware has not been tested
 cargo run -p pal-vm --release --bin sena -- /path/to/game --nls sjis
 ```
 
+A game root that carries a `mai` fan-translation patch (`mai.dll` plus `mai/`)
+can be run with that overlay applied; see
+[reverse/mai-translation-patch.md](reverse/mai-translation-patch.md).
+
+```bash
+cargo run -p pal-vm --release --bin sena -- /path/to/game --patch mai
+```
+
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

@@ -252,6 +252,34 @@ impl TextLang {
     }
 }
 
+/// A fan-translation overlay applied on top of the game root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranslationPatch {
+    /// A proxy `mai.dll` plus the `mai/` directory it reads next to the
+    /// executable, see [`pal_asset::MaiPatch`].
+    Mai,
+}
+
+impl TranslationPatch {
+    /// Patch directory relative to the game root.
+    pub fn directory(self) -> &'static str {
+        match self {
+            Self::Mai => "mai",
+        }
+    }
+}
+
+impl std::str::FromStr for TranslationPatch {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "mai" => Ok(Self::Mai),
+            other => Err(format!("unknown translation patch {other:?} (expected mai)")),
+        }
+    }
+}
+
 impl std::str::FromStr for TextLang {
     type Err = String;
 
@@ -321,14 +349,15 @@ pub fn parse_ini_nls(bytes: &[u8], nls: Nls) -> anyhow::Result<IniFile> {
 pub fn parse_system_ini(bytes: &[u8], nls: Nls) -> anyhow::Result<IniFile> {
     match parse_ini_nls(bytes, nls) {
         Ok(ini) => {
-            log::info!("SYSTEM.INI decoded as {nls:?}");
+            log::info!("SYSTEM.INI decoded as {}", nls.name());
             Ok(ini)
         }
         Err(requested) => match parse_ini_nls(bytes, Nls::ShiftJis) {
             Ok(ini) => {
                 log::warn!(
-                    "SYSTEM.INI does not decode as {nls:?} ({requested}); \
-                     read as the engine's Shift-Jis"
+                    "SYSTEM.INI does not decode as {} ({requested}); \
+                     read as the engine's Shift-Jis",
+                    nls.name()
                 );
                 Ok(ini)
             }

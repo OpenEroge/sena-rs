@@ -4,12 +4,17 @@ use std::str::FromStr;
 use encoding_rs::{Encoding, GBK, SHIFT_JIS, UTF_8};
 
 use crate::error::{AssetError, Result};
+use crate::mai::MaiCharset;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Nls {
+    #[default]
     ShiftJis,
     Gbk,
     Utf8,
+    /// Shift-JIS bytes remapped by a `mai` translation patch. Only
+    /// [`crate::MaiPatch`] produces it, so it has no command-line spelling.
+    Mai(&'static MaiCharset),
 }
 
 impl Nls {
@@ -18,18 +23,24 @@ impl Nls {
             Self::ShiftJis => "sjis",
             Self::Gbk => "gbk",
             Self::Utf8 => "utf-8",
+            Self::Mai(_) => "mai",
         }
     }
 
+    /// The byte-level encoding. A `mai` charset keeps the Shift-JIS byte
+    /// structure, so it reports Shift-JIS here.
     pub fn encoding(self) -> &'static Encoding {
         match self {
-            Self::ShiftJis => SHIFT_JIS,
+            Self::ShiftJis | Self::Mai(_) => SHIFT_JIS,
             Self::Gbk => GBK,
             Self::Utf8 => UTF_8,
         }
     }
 
     pub fn decode(self, bytes: &[u8]) -> Result<String> {
+        if let Self::Mai(charset) = self {
+            return Ok(charset.decode(bytes));
+        }
         let (decoded, _encoding_used, had_errors) = self.encoding().decode(bytes);
         if had_errors {
             return Err(AssetError::EncodingDecode { nls: self.name() });
@@ -41,6 +52,12 @@ impl Nls {
     }
 
     pub fn encode(self, text: &str) -> Result<Vec<u8>> {
+        if let Self::Mai(charset) = self {
+            return charset.encode(text).ok_or_else(|| AssetError::EncodingEncode {
+                nls: self.name(),
+                text: text.to_owned(),
+            });
+        }
         let (encoded, _encoding_used, had_errors) = self.encoding().encode(text);
         if had_errors {
             return Err(AssetError::EncodingEncode {
@@ -52,12 +69,6 @@ impl Nls {
             Cow::Borrowed(bytes) => bytes.to_vec(),
             Cow::Owned(bytes) => bytes,
         })
-    }
-}
-
-impl Default for Nls {
-    fn default() -> Self {
-        Self::ShiftJis
     }
 }
 

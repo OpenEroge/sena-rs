@@ -1202,6 +1202,7 @@ mod tests {
             registered_softpal: false,
             point_table: PointTable::parse(&[]).unwrap(),
             graphic_index: None,
+            text_patch: None,
         };
         let mut vm = runtime();
         // Native pop order: size, body x/y, width/height, name x/y, pitch.

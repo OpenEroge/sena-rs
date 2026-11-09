@@ -47,6 +47,7 @@ mod tests {
             registered_softpal: false,
             point_table: PointTable::parse(&points).unwrap(),
             graphic_index: None,
+            text_patch: None,
         }
     }
 

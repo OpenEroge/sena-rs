@@ -37,6 +37,7 @@ pub(super) fn load_sprite_resource(
             continue;
         };
         if *suffix == ".mpg" {
+            log::debug!("[trace-assets] movie sprite {:?} from {:?}", asset.name, asset.source);
             match movies.load_movie(asset.name.clone(), std::mem::take(&mut asset.bytes)) {
                 Ok(movie) => {
                     let image = DecodedImage {

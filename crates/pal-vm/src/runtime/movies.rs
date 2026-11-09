@@ -104,6 +104,7 @@ impl ScriptRuntime {
             log::warn!("movie_play could not find a supported movie for {name:?}");
             return ExtCallOutcome::Continue;
         };
+        log::debug!("[trace-assets] movie_play {:?} from {:?}", asset.name, asset.source);
         self.finish_full_movie(sprites);
         let loaded = match self.msprite_system.load_movie(asset.name, asset.bytes) {
             Ok(loaded) => loaded,
