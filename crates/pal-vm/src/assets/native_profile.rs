@@ -47,8 +47,8 @@ impl NativeBuild {
     }
 
     /// trenka.exe defines extra category 18 wrappers: the dictionary table,
-    /// save-folder helpers, a global word table and the scene-skip query
-    /// (18:50, 59, 72, 73, 79, 82..87, 108; see runtime/tips_dictionary.rs).
+    /// save-folder helpers, favourite voices with their global word table
+    /// and the scene-skip query (18:50, 59, 60..68, 72, 73, 79, 82..87, 108).
     pub fn defines_system_extensions(self) -> bool {
         self == NativeBuild::Trenka
     }

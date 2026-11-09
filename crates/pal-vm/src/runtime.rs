@@ -87,6 +87,7 @@ mod history_navigation;
 use buttons::{ButtonSounds, PendingButtonReaction};
 mod tips;
 mod tips_dictionary;
+mod voice_favorites;
 use tips::{SavedTipsState, TipsState};
 use select::SelectSubsystemState;
 
@@ -560,6 +561,7 @@ pub struct ScriptRuntime {
     text_state: TextSubsystemState,
     tips_state: TipsState,
     tips_dictionary: tips_dictionary::TipsDictionary,
+    voice_favorites: voice_favorites::VoiceFavorites,
     /// Text skip latch (koikake.exe ADVctx+0x31828, written by skip_set
     /// 0x428E10, read through GetSkipState 0x437800 bit 0).  The ADV text
     /// task consults it every frame while deciding whether to bypass waits.
@@ -1557,6 +1559,7 @@ impl ScriptRuntime {
             text_state: TextSubsystemState::default(),
             tips_state: TipsState::default(),
             tips_dictionary: Default::default(),
+            voice_favorites: Default::default(),
             text_skip_enabled: false,
             text_auto_enabled: false,
             scene_skip_active: false,
@@ -19101,6 +19104,22 @@ mod tests {
         // A third line would pass the height limit (36 + 18 > 40).
         assert_eq!(wrap_save_title("あいうえおかきくけこ", 16, 40, 40, narrow), "あい\nうえ");
         assert_eq!(wrap_save_title("a<tag>b", 16, 1000, 100, narrow), "ab");
+    }
+
+    #[test]
+    fn trenka_system_extensions_are_dispatched_and_others_skip() {
+        let (mut assets, _) = empty_core_assets(false);
+        let indices = [50, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 72, 73, 79, 82, 83, 84, 86, 87, 108];
+        for build in [crate::assets::NativeBuild::Trenka, crate::assets::NativeBuild::Unknown] {
+            assets.native_build = build;
+            for index in indices {
+                let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+                vm.stack.extend([0; 8]);
+                let outcome = vm.dispatch_build_system_ext(index, &assets, Nls::ShiftJis, None);
+                let skipped = outcome == ExtCallOutcome::Skip;
+                assert_eq!(skipped, build != crate::assets::NativeBuild::Trenka, "18:{index} for {build:?}");
+            }
+        }
     }
 
     #[test]
