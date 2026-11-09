@@ -60,6 +60,10 @@ pub struct SenaConfig {
     pub diagnostic_png: Option<PathBuf>,
     pub diagnostic_png_at: Vec<DiagnosticPngAt>,
     pub window_dump_frame_at: Vec<DiagnosticPngAt>,
+    /// Headless only: the physical surface size to emulate. Input is mapped
+    /// through it and PNG snapshots go through the device compositor, so a
+    /// HiDPI or non-16:9 window can be checked without opening one.
+    pub diagnostic_device_size: Option<(u32, u32)>,
     pub diagnostic_clicks: Vec<DiagnosticClick>,
     pub diagnostic_click_when_hit_enabled: Vec<DiagnosticClickWhenHitEnabled>,
     pub diagnostic_key_events: Vec<DiagnosticKeyEvent>,
@@ -142,6 +146,7 @@ impl Default for SenaConfig {
             diagnostic_png: None,
             diagnostic_png_at: Vec::new(),
             window_dump_frame_at: Vec::new(),
+            diagnostic_device_size: None,
             diagnostic_clicks: Vec::new(),
             diagnostic_click_when_hit_enabled: Vec::new(),
             diagnostic_key_events: Vec::new(),
@@ -172,6 +177,7 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
     } else {
         (config.width, config.height)
     };
+    let (width, height) = config.diagnostic_device_size.unwrap_or((width, height));
     engine.handle_event(PalEvent::Resized { width, height });
     let (logical_width, logical_height) = engine.logical_size_from_config(
         FrameScene::PAL_DEFAULT_WIDTH,
@@ -211,10 +217,7 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
         }
         for click in &config.diagnostic_clicks {
             if frame_index == click.frame {
-                engine.handle_event(PalEvent::Input(InputEvent::CursorMoved {
-                    x: click.x as f64,
-                    y: click.y as f64,
-                }));
+                engine.handle_event(headless_cursor(&engine, &config, click.x, click.y));
                 engine.handle_event(PalEvent::Input(InputEvent::MouseInput {
                     button: click.button,
                     pressed: true,
@@ -310,7 +313,7 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
                 || (snapshot.frame == config.diagnostic_frames
                     && frame_index.saturating_add(1) == config.diagnostic_frames)
             {
-                write_scene_png(&frame.scene, &snapshot.path)?;
+                write_scene_png(&frame.scene, &snapshot.path, config.diagnostic_device_size)?;
                 eprintln!(
                     "[headless] wrote diagnostic png-at frame={} {}",
                     frame_index,
@@ -332,7 +335,7 @@ pub fn run_sena_headless(config: SenaConfig) -> anyhow::Result<()> {
         }
     }
     if let (Some(path), Some(frame)) = (&config.diagnostic_png, last_frame.as_ref()) {
-        write_scene_png(&frame.scene, path)?;
+        write_scene_png(&frame.scene, path, config.diagnostic_device_size)?;
         eprintln!("[headless] wrote diagnostic png {}", path.display());
     }
     // A headless run ends like a native exit, which saves system data.
@@ -648,10 +651,7 @@ impl SenaApplication {
             FrameScene::PAL_DEFAULT_WIDTH,
             FrameScene::PAL_DEFAULT_HEIGHT,
         );
-        (
-            x as f64 * size.width.max(1) as f64 / logical_width.max(1) as f64,
-            y as f64 * size.height.max(1) as f64 / logical_height.max(1) as f64,
-        )
+        logical_to_device([size.width, size.height], [logical_width, logical_height], x, y)
     }
 
     fn render(&mut self, event_loop: &ActiveEventLoop) {
@@ -945,10 +945,7 @@ fn inject_headless_auto_advance(
     if !matches!(engine.runtime_status(), RuntimeStatus::WaitClick { .. }) {
         return;
     }
-    engine.handle_event(PalEvent::Input(InputEvent::CursorMoved {
-        x: auto.x as f64,
-        y: auto.y as f64,
-    }));
+    engine.handle_event(headless_cursor(engine, config, auto.x, auto.y));
     engine.handle_event(PalEvent::Input(InputEvent::MouseInput {
         button: MouseButton::Left,
         pressed: true,
@@ -979,10 +976,7 @@ fn inject_headless_click_when_hit_enabled(
         let Some(hit) = engine.diagnostic_button_hit_enabled(click.x, click.y) else {
             continue;
         };
-        engine.handle_event(PalEvent::Input(InputEvent::CursorMoved {
-            x: click.x as f64,
-            y: click.y as f64,
-        }));
+        engine.handle_event(headless_cursor(engine, config, click.x, click.y));
         engine.handle_event(PalEvent::Input(InputEvent::MouseInput {
             button: MouseButton::Left,
             pressed: true,
@@ -996,10 +990,48 @@ fn inject_headless_click_when_hit_enabled(
     }
 }
 
-fn write_scene_png(scene: &FrameScene, path: &PathBuf) -> anyhow::Result<()> {
-    let width = scene.logical_width.max(1);
-    let height = scene.logical_height.max(1);
-    let pixels = rasterize_scene_rgba(scene);
+/// Headless cursor events are given in PAL coordinates; with an emulated
+/// device size they are mapped to the device pixel at that PAL pixel's center.
+fn headless_cursor(engine: &Engine, config: &SenaConfig, x: i32, y: i32) -> PalEvent {
+    let (x, y) = match config.diagnostic_device_size {
+        Some((width, height)) => {
+            let (logical_width, logical_height) = engine.logical_size_from_config(
+                FrameScene::PAL_DEFAULT_WIDTH,
+                FrameScene::PAL_DEFAULT_HEIGHT,
+            );
+            logical_to_device([width, height], [logical_width, logical_height], x, y)
+        }
+        None => (x as f64, y as f64),
+    };
+    PalEvent::Input(InputEvent::CursorMoved { x, y })
+}
+
+/// The device position of a PAL pixel's center inside the letterboxed screen.
+fn logical_to_device(device: [u32; 2], logical: [u32; 2], x: i32, y: i32) -> (f64, f64) {
+    let viewport = crate::scene::letterbox_rect(device, logical);
+    (
+        viewport.x as f64 + (x as f64 + 0.5) * viewport.w as f64 / logical[0].max(1) as f64,
+        viewport.y as f64 + (y as f64 + 0.5) * viewport.h as f64 / logical[1].max(1) as f64,
+    )
+}
+
+fn write_scene_png(
+    scene: &FrameScene,
+    path: &PathBuf,
+    device_size: Option<(u32, u32)>,
+) -> anyhow::Result<()> {
+    let (width, height, pixels) = match device_size {
+        Some((width, height)) => (
+            width.max(1),
+            height.max(1),
+            crate::renderer::rasterize_scene_device_rgba(scene, width, height),
+        ),
+        None => (
+            scene.logical_width.max(1),
+            scene.logical_height.max(1),
+            rasterize_scene_rgba(scene),
+        ),
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

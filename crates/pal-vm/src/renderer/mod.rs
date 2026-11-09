@@ -9,7 +9,7 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::scene::{
-    rasterize_scene_rgba, DrawCommand, FrameScene, RectF, SceneTexture, SceneTextureFormat,
+    letterbox_rect, rasterize_scene_rgba, DrawCommand, FrameScene, RectF, SceneTexture, SceneTextureFormat,
     SceneTextureId, SolidQuad, SpriteDraw,
 };
 
@@ -189,19 +189,24 @@ impl Renderer {
                 }
             }
             Backend::Wgpu(backend) => {
-                let outcome = match backend.render(scene, self.clear_color) {
+                let capture = frame_dump.is_some() || dump_path.is_some();
+                let outcome = match backend.render(scene, self.clear_color, capture) {
                     Ok(outcome) => outcome,
                     Err(err) => {
                         log::error!("wgpu renderer failed: {err}");
                         RenderOutcome::Skipped
                     }
                 };
-                if frame_dump.is_some() || dump_path.is_some() {
-                    // GPU readback is not wired up; diagnostic dumps are
-                    // rasterized on the CPU at logical resolution instead, and
-                    // do not depend on the frame having been presented.
-                    let rgba = rasterize_scene_rgba(scene);
-                    let (width, height) = (scene.logical_width.max(1), scene.logical_height.max(1));
+                if capture {
+                    // Prefer the real GPU surface; fall back to the logical
+                    // CPU rasterizer when no frame was presented.
+                    let (width, height, rgba) = backend.take_captured_frame().unwrap_or_else(|| {
+                        (
+                            scene.logical_width.max(1),
+                            scene.logical_height.max(1),
+                            rasterize_scene_rgba(scene),
+                        )
+                    });
                     if let Some(path) = frame_dump {
                         match write_rgba_png(Path::new(path), &rgba, width, height) {
                             Ok(()) => {
@@ -232,10 +237,11 @@ impl SoftwareBackend {
                 .any(|texture| texture.id == *texture_id)
         });
         for texture in &scene.textures {
+            let (width, height, _, _) = texture.device_texels();
             let needs_upload = self.scene_textures.get(&texture.id).is_none_or(|cached| {
                 cached.generation != texture.generation
-                    || cached.width != texture.width
-                    || cached.height != texture.height
+                    || cached.width != width
+                    || cached.height != height
             });
             if needs_upload {
                 match CachedTexture::from_scene(texture) {
@@ -266,7 +272,13 @@ impl SoftwareBackend {
             [width as u32, height as u32],
             [scene.logical_width.max(1), scene.logical_height.max(1)],
         );
-        let scene_textures = &self.scene_textures;
+        let viewport = composite_scene_device(
+            &self.scene_textures,
+            scene,
+            clear,
+            metrics.viewport.w as usize,
+            metrics.viewport.h as usize,
+        );
         let mut buffer = self
             .surface
             .buffer_mut()
@@ -278,38 +290,7 @@ impl SoftwareBackend {
                 width.saturating_mul(height)
             );
         }
-        buffer.fill(clear);
-        let transformed = scene.raster_stage.is_some() || scene.commands.iter().any(|command| matches!(command,
-            DrawCommand::Sprite(sprite) if sprite.raster_fx.is_some() || sprite.rotation[2].rem_euclid(512.0) != 0.0));
-        if transformed {
-            let rgba = rasterize_scene_rgba(scene);
-            let logical_w = scene.logical_width.max(1) as usize;
-            let logical_h = scene.logical_height.max(1) as usize;
-            for y in 0..height {
-                for x in 0..width {
-                    let offset = ((y * logical_h / height) * logical_w + x * logical_w / width) * 4;
-                    buffer[y * width + x] = ((rgba[offset] as u32) << 16)
-                        | ((rgba[offset + 1] as u32) << 8)
-                        | rgba[offset + 2] as u32;
-                }
-            }
-        } else {
-            for command in &scene.commands {
-                match command {
-                    DrawCommand::Sprite(sprite) => draw_sprite(
-                        scene_textures,
-                        &mut buffer,
-                        width,
-                        height,
-                        metrics.scale,
-                        sprite,
-                    ),
-                    DrawCommand::SolidQuad(quad) => {
-                        draw_solid_quad(&mut buffer, width, height, metrics.scale, *quad)
-                    }
-                }
-            }
-        }
+        blit_letterboxed(&mut buffer, width, height, &viewport, metrics.viewport);
         if pal_debug_enabled() {
             eprintln!(
                 "[PAL_DEBUG] render_target: window={}x{} logical={}x{} surface={}x{} scale=({:.6},{:.6}) viewport=({}, {}, {}x{})",
@@ -385,16 +366,17 @@ impl RenderTargetMetrics {
         let surface_h = surface_size[1].max(1);
         let logical_w = logical_size[0].max(1);
         let logical_h = logical_size[1].max(1);
+        let viewport = letterbox_rect([surface_w, surface_h], [logical_w, logical_h]);
         let scale = [
-            surface_w as f32 / logical_w as f32,
-            surface_h as f32 / logical_h as f32,
+            viewport.w / logical_w as f32,
+            viewport.h / logical_h as f32,
         ];
         Self {
             window_physical_size: [surface_w, surface_h],
             logical_size: [logical_w, logical_h],
             surface_size: [surface_w, surface_h],
             scale,
-            viewport: RectF::new(0.0, 0.0, surface_w as f32, surface_h as f32),
+            viewport,
         }
     }
 }
@@ -410,13 +392,115 @@ pub fn sprite_transform_debug(
     sprite: &SpriteDraw,
     metrics: &RenderTargetMetrics,
 ) -> SpriteTransformDebug {
-    let dst_device = scaled_rect(sprite.dst, metrics.scale);
+    let scaled = scaled_rect(sprite.dst, metrics.scale);
+    let dst_device = RectF::new(
+        scaled.x + metrics.viewport.x,
+        scaled.y + metrics.viewport.y,
+        scaled.w,
+        scaled.h,
+    );
     let uv = sprite.src;
     SpriteTransformDebug {
         dst_device,
         uv,
         clip_quad: pal_device_rect_to_clip_quad(dst_device, metrics.surface_size),
     }
+}
+
+/// Composite a scene at `width`x`height` device pixels (the letterboxed PAL
+/// viewport, not the whole surface) and return 0x00RRGGBB pixels.
+fn composite_scene_device(
+    textures: &HashMap<SceneTextureId, CachedTexture>,
+    scene: &FrameScene,
+    clear: u32,
+    width: usize,
+    height: usize,
+) -> Vec<u32> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let mut buffer = vec![clear; width * height];
+    let transformed = scene.raster_stage.is_some() || scene.commands.iter().any(|command| matches!(command,
+        DrawCommand::Sprite(sprite) if sprite.raster_fx.is_some() || sprite.rotation[2].rem_euclid(512.0) != 0.0));
+    if transformed {
+        // Transformed sprites and raster stages only exist in the logical
+        // rasterizer; upscale its result to the viewport.
+        let rgba = rasterize_scene_rgba(scene);
+        let logical_w = scene.logical_width.max(1) as usize;
+        let logical_h = scene.logical_height.max(1) as usize;
+        for y in 0..height {
+            for x in 0..width {
+                let offset = ((y * logical_h / height) * logical_w + x * logical_w / width) * 4;
+                buffer[y * width + x] = ((rgba[offset] as u32) << 16)
+                    | ((rgba[offset + 1] as u32) << 8)
+                    | rgba[offset + 2] as u32;
+            }
+        }
+        return buffer;
+    }
+    let scale = [
+        width as f32 / scene.logical_width.max(1) as f32,
+        height as f32 / scene.logical_height.max(1) as f32,
+    ];
+    for command in &scene.commands {
+        match command {
+            DrawCommand::Sprite(sprite) => {
+                draw_sprite(textures, &mut buffer, width, height, scale, sprite)
+            }
+            DrawCommand::SolidQuad(quad) => {
+                draw_solid_quad(&mut buffer, width, height, scale, *quad)
+            }
+        }
+    }
+    buffer
+}
+
+/// Copy a composited viewport into a surface and paint the bars black.
+fn blit_letterboxed(
+    surface: &mut [u32],
+    surface_w: usize,
+    surface_h: usize,
+    viewport_pixels: &[u32],
+    viewport: RectF,
+) {
+    surface.fill(0);
+    let (vx, vy) = (viewport.x as usize, viewport.y as usize);
+    let vw = (viewport.w as usize).min(surface_w.saturating_sub(vx));
+    let vh = (viewport.h as usize).min(surface_h.saturating_sub(vy));
+    let stride = viewport.w as usize;
+    for row in 0..vh {
+        let src = &viewport_pixels[row * stride..row * stride + vw];
+        let dst_start = (vy + row) * surface_w + vx;
+        surface[dst_start..dst_start + vw].copy_from_slice(src);
+    }
+}
+
+/// Composite a scene at an arbitrary device size with the software
+/// compositor, letterboxed exactly like a window of that size. Returns RGBA.
+pub fn rasterize_scene_device_rgba(scene: &FrameScene, width: u32, height: u32) -> Vec<u8> {
+    let textures: HashMap<_, _> = scene
+        .textures
+        .iter()
+        .filter_map(|texture| Some((texture.id, CachedTexture::from_scene(texture).ok()?)))
+        .collect();
+    let metrics = RenderTargetMetrics::new(
+        [width.max(1), height.max(1)],
+        [scene.logical_width.max(1), scene.logical_height.max(1)],
+    );
+    let clear = color_to_rgb(scene_clear_color(scene, RendererConfig::default().clear_color));
+    let viewport = composite_scene_device(
+        &textures,
+        scene,
+        clear,
+        metrics.viewport.w as usize,
+        metrics.viewport.h as usize,
+    );
+    let (width, height) = (width.max(1) as usize, height.max(1) as usize);
+    let mut surface = vec![0; width * height];
+    blit_letterboxed(&mut surface, width, height, &viewport, metrics.viewport);
+    surface
+        .iter()
+        .flat_map(|pixel| [(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8, 0xFF])
+        .collect()
 }
 
 pub fn scaled_rect(rect: RectF, scale: [f32; 2]) -> RectF {
@@ -443,20 +527,23 @@ struct CachedTexture {
     generation: u64,
     width: u32,
     height: u32,
+    /// Texels per PAL source pixel; scales the sprite's source rectangle.
+    density: u32,
     pixels: Arc<Vec<u8>>,
 }
 
 impl CachedTexture {
     fn from_scene(texture: &SceneTexture) -> anyhow::Result<Self> {
-        if texture.width == 0 || texture.height == 0 {
+        let (width, height, density, pixels) = texture.device_texels();
+        if width == 0 || height == 0 {
             anyhow::bail!("texture {:?} has an empty size", texture.id);
         }
-        let expected = texture.width as usize * texture.height as usize * 4;
-        if texture.pixels.len() != expected {
+        let expected = width as usize * height as usize * 4;
+        if pixels.len() != expected {
             anyhow::bail!(
                 "texture {:?} has {} bytes, expected {}",
                 texture.id,
-                texture.pixels.len(),
+                pixels.len(),
                 expected
             );
         }
@@ -465,9 +552,10 @@ impl CachedTexture {
         }
         Ok(Self {
             generation: texture.generation,
-            width: texture.width,
-            height: texture.height,
-            pixels: texture.pixels.clone(),
+            width,
+            height,
+            density,
+            pixels: pixels.clone(),
         })
     }
 }
@@ -537,13 +625,20 @@ fn draw_textured_rect(
     let src_h = sprite.src.h * texture.height as f32;
     let smooth_upscale =
         sprite.smooth_upscale && (dst_rect.w > src_w * 1.1 || dst_rect.h > src_h * 1.1);
+    let density = texture.density.max(1) as i32;
     let source_bounds = [
-        sprite.source_rect[0].clamp(0, texture.width as i32 - 1),
-        sprite.source_rect[1].clamp(0, texture.height as i32 - 1),
+        sprite.source_rect[0]
+            .saturating_mul(density)
+            .clamp(0, texture.width as i32 - 1),
+        sprite.source_rect[1]
+            .saturating_mul(density)
+            .clamp(0, texture.height as i32 - 1),
         sprite.source_rect[2]
+            .saturating_mul(density)
             .saturating_sub(1)
             .clamp(0, texture.width as i32 - 1),
         sprite.source_rect[3]
+            .saturating_mul(density)
             .saturating_sub(1)
             .clamp(0, texture.height as i32 - 1),
     ];
@@ -796,6 +891,7 @@ mod tests {
             generation: 1,
             width: 2,
             height: 1,
+            density: 1,
             pixels: Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 255]),
         };
         let mut smooth = [0; 4];
@@ -823,6 +919,7 @@ mod tests {
             generation: 1,
             width: 2,
             height: 1,
+            density: 1,
             pixels: Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 0]),
         };
         let middle = sample_bilinear(&texture, 0.5, 0.0, [0, 0, 1, 0]);

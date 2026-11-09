@@ -510,6 +510,12 @@ impl Engine {
             logical_width,
             logical_height,
         );
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.set_text_density(crate::scene::text_density(
+                [self.window_physical_size.0, self.window_physical_size.1],
+                [logical_width, logical_height],
+            ));
+        }
 
         // Update PAL cached time used by all task timing (animation delays, wait timeouts).
         self.task_system

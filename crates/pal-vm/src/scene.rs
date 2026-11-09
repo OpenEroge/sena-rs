@@ -97,9 +97,35 @@ pub struct SceneTexture {
     pub format: SceneTextureFormat,
     // Share ownership of the decoder allocation without copying its pixels.
     pub pixels: Arc<Vec<u8>>,
+    /// Optional denser copy for device renderers. Logical consumers (PNG
+    /// snapshots, save thumbnails, transitions) keep using `pixels`.
+    pub hires: Option<HiresPixels>,
+}
+
+/// A host-rendered surface drawn at `density` texels per PAL pixel, so text
+/// stays sharp on HiDPI windows. Its size is exactly `density` times the
+/// owning texture's logical size.
+#[derive(Clone, Debug)]
+pub struct HiresPixels {
+    pub density: u32,
+    pub pixels: Arc<Vec<u8>>,
 }
 
 impl SceneTexture {
+    /// The texels a device renderer should sample, with their size and
+    /// density. Normalized source UVs are the same for either copy.
+    pub fn device_texels(&self) -> (u32, u32, u32, &Arc<Vec<u8>>) {
+        match &self.hires {
+            Some(hires) => (
+                self.width * hires.density,
+                self.height * hires.density,
+                hires.density,
+                &hires.pixels,
+            ),
+            None => (self.width, self.height, 1, &self.pixels),
+        }
+    }
+
     pub fn rgba8(
         id: SceneTextureId,
         generation: u64,
@@ -114,6 +140,7 @@ impl SceneTexture {
             height,
             format: SceneTextureFormat::Rgba8,
             pixels: Arc::new(pixels),
+            hires: None,
         }
     }
 
@@ -280,6 +307,82 @@ impl RectF {
     pub fn is_drawable(self) -> bool {
         self.w.abs() > f32::EPSILON && self.h.abs() > f32::EPSILON
     }
+}
+
+/// Texels per PAL pixel for host-rendered text on a device surface: the whole
+/// part of the letterbox scale, so dense surfaces are only ever magnified.
+pub fn text_density(surface: [u32; 2], logical: [u32; 2]) -> u32 {
+    let viewport = letterbox_rect(surface, logical);
+    let scale = (viewport.w / logical[0].max(1) as f32).min(viewport.h / logical[1].max(1) as f32);
+    (scale + 1.0e-3).floor().clamp(1.0, MAX_TEXT_DENSITY as f32) as u32
+}
+
+pub const MAX_TEXT_DENSITY: u32 = 4;
+
+/// Magnify RGBA pixels by an integer factor with the same premultiplied
+/// bilinear filter the renderers use for smooth UI surfaces, so a dense
+/// surface built from magnified art matches what the plain surface showed.
+pub fn upscale_rgba(rgba: &[u8], width: u32, height: u32, factor: u32) -> Vec<u8> {
+    let (width, height, factor) = (width as usize, height as usize, factor.max(1) as usize);
+    let (out_w, out_h) = (width * factor, height * factor);
+    let mut out = vec![0_u8; out_w * out_h * 4];
+    if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        return out;
+    }
+    let sample = |x: usize, y: usize| &rgba[(y * width + x) * 4..(y * width + x) * 4 + 4];
+    for oy in 0..out_h {
+        let sy = ((oy as f32 + 0.5) / factor as f32 - 0.5).clamp(0.0, (height - 1) as f32);
+        let (y0, fy) = (sy.floor() as usize, sy.fract());
+        let y1 = (y0 + 1).min(height - 1);
+        for ox in 0..out_w {
+            let sx = ((ox as f32 + 0.5) / factor as f32 - 0.5).clamp(0.0, (width - 1) as f32);
+            let (x0, fx) = (sx.floor() as usize, sx.fract());
+            let x1 = (x0 + 1).min(width - 1);
+            let mut alpha = 0.0_f32;
+            let mut premul = [0.0_f32; 3];
+            for (px, py, weight) in [
+                (x0, y0, (1.0 - fx) * (1.0 - fy)),
+                (x1, y0, fx * (1.0 - fy)),
+                (x0, y1, (1.0 - fx) * fy),
+                (x1, y1, fx * fy),
+            ] {
+                let texel = sample(px, py);
+                let a = f32::from(texel[3]) * weight;
+                alpha += a;
+                for (channel, value) in premul.iter_mut().enumerate() {
+                    *value += f32::from(texel[channel]) * a;
+                }
+            }
+            if alpha <= 0.0 {
+                continue;
+            }
+            let index = (oy * out_w + ox) * 4;
+            for channel in 0..3 {
+                out[index + channel] = (premul[channel] / alpha).round().clamp(0.0, 255.0) as u8;
+            }
+            out[index + 3] = alpha.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// The device-pixel rectangle the PAL screen occupies inside a surface.
+///
+/// The PAL screen keeps its aspect ratio and is centered; the remaining
+/// surface area is a black letterbox or pillarbox. The rectangle is snapped
+/// to whole device pixels so every renderer and the input mapping agree on
+/// the same edges.
+pub fn letterbox_rect(surface: [u32; 2], logical: [u32; 2]) -> RectF {
+    let surface_w = surface[0].max(1) as f64;
+    let surface_h = surface[1].max(1) as f64;
+    let logical_w = logical[0].max(1) as f64;
+    let logical_h = logical[1].max(1) as f64;
+    let scale = (surface_w / logical_w).min(surface_h / logical_h);
+    let w = (logical_w * scale).round().clamp(1.0, surface_w);
+    let h = (logical_h * scale).round().clamp(1.0, surface_h);
+    let x = ((surface_w - w) / 2.0).floor();
+    let y = ((surface_h - h) / 2.0).floor();
+    RectF::new(x as f32, y as f32, w as f32, h as f32)
 }
 
 pub fn rasterize_scene_rgba(scene: &FrameScene) -> Vec<u8> {
@@ -580,4 +683,39 @@ fn blend_pixel_mode(
     } else {
         255
     };
+}
+
+#[cfg(test)]
+mod hidpi_tests {
+    use super::*;
+
+    #[test]
+    fn letterbox_keeps_the_pal_aspect_ratio_centered() {
+        assert_eq!(letterbox_rect([2560, 1440], [1280, 720]), RectF::new(0.0, 0.0, 2560.0, 1440.0));
+        // A 3024x1964 Retina panel is taller than 16:9: bars above and below.
+        assert_eq!(letterbox_rect([3024, 1964], [1280, 720]), RectF::new(0.0, 131.0, 3024.0, 1701.0));
+        // A wide window gets pillarbox bars instead.
+        assert_eq!(letterbox_rect([2000, 720], [1280, 720]), RectF::new(360.0, 0.0, 1280.0, 720.0));
+    }
+
+    #[test]
+    fn text_density_only_magnifies() {
+        assert_eq!(text_density([1280, 720], [1280, 720]), 1);
+        assert_eq!(text_density([1919, 1080], [1280, 720]), 1);
+        assert_eq!(text_density([2560, 1440], [1280, 720]), 2);
+        assert_eq!(text_density([3024, 1964], [1280, 720]), 2);
+        assert_eq!(text_density([7680, 4320], [1280, 720]), MAX_TEXT_DENSITY);
+    }
+
+    #[test]
+    fn upscale_keeps_flat_areas_and_size() {
+        let rgba = [10, 20, 30, 255].repeat(6);
+        let out = upscale_rgba(&rgba, 3, 2, 2);
+        assert_eq!(out.len(), 6 * 4 * 4);
+        assert!(out.chunks_exact(4).all(|px| px == [10, 20, 30, 255]));
+        // Transparent texels do not darken an opaque neighbor's color.
+        let mixed = [[255, 0, 0, 255], [0, 0, 0, 0]].concat();
+        let out = upscale_rgba(&mixed, 2, 1, 2);
+        assert_eq!(&out[4..8], &[255, 0, 0, 191]);
+    }
 }

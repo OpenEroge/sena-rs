@@ -568,6 +568,9 @@ pub struct ScriptRuntime {
     /// Native voice_wait stores a wait mask and rewinds PC until the voice checker reports idle.
     pending_voice_wait_slot: Option<i32>,
     font_state: PalFontSystem,
+    /// Texels per PAL pixel for host-drawn text surfaces (ADV body, name,
+    /// backlog). 1 on a window no larger than the PAL screen.
+    text_density: u32,
     text_state: TextSubsystemState,
     tips_state: TipsState,
     tips_dictionary: tips_dictionary::TipsDictionary,
@@ -1050,6 +1053,17 @@ struct AdvTextPanelCache {
     full_char_count: usize,
     sprite_x: i32,
     sprite_y: i32,
+    /// The same panel and text block at a higher density, for HiDPI windows.
+    dense: Option<AdvTextDenseLayer>,
+}
+
+/// Dense copies of an `AdvTextPanelCache`'s pixels. Geometry stays in the
+/// cache's PAL units and is scaled by `density` when composing.
+#[derive(Clone, Debug)]
+struct AdvTextDenseLayer {
+    density: u32,
+    panel_rgba: Vec<u8>,
+    text_rgba: Vec<u8>,
 }
 
 impl AdvTextPanelCache {
@@ -1291,10 +1305,25 @@ struct HistorySubsystemState {
     /// Bumped on every records mutation; the wrapped layout cache keys on it.
     records_generation: u64,
     layout_cache: Option<HistoryLayoutCache>,
+    /// Inputs of the page last drawn into `sprite`.
+    presented_page: Option<HistoryPageKey>,
     /// Record index under the mouse, maintained by history_update (idx6).
     hovered_record: Option<usize>,
     skipped: bool,
     sprite: Option<SpriteHandle>,
+}
+
+/// Everything the backlog page's pixels depend on.
+#[derive(Clone, Debug, PartialEq)]
+struct HistoryPageKey {
+    layout_generation: u64,
+    rect: [i32; 4],
+    start: usize,
+    tops: Vec<i32>,
+    hovered: Option<usize>,
+    colors: [i32; 2],
+    typeset: (u16, u32, i32, i32, i32, i32, i32),
+    density: u32,
 }
 
 /// Wrapped per-record layout for the backlog view.  Rebuilt lazily whenever
@@ -1569,6 +1598,7 @@ impl ScriptRuntime {
             se_muted: BTreeMap::new(),
             pending_voice_wait_slot: None,
             font_state: PalFontSystem::new(),
+            text_density: 1,
             text_state: TextSubsystemState::default(),
             tips_state: TipsState::default(),
             tips_dictionary: Default::default(),
@@ -2524,9 +2554,25 @@ impl ScriptRuntime {
                     let (mark_x, mark_y) = cache.text_end_position();
                     (mark_w, mark_h, mark_rgba, mark_x, mark_y)
                 });
-                compose_adv_text_frame(cache, reveal_limit, animation_progress, wait_mark)
+                let dense = cache.dense.as_ref().map(|layer| {
+                    (
+                        layer.density,
+                        compose_adv_text_layer(
+                            cache,
+                            layer.density,
+                            &layer.panel_rgba,
+                            &layer.text_rgba,
+                            reveal_limit,
+                            animation_progress,
+                            wait_mark.as_ref(),
+                        ),
+                    )
+                });
+                let (width, height, rgba, x, y) =
+                    compose_adv_text_frame(cache, reveal_limit, animation_progress, wait_mark);
+                (width, height, rgba, x, y, dense)
             });
-            if let Some((width, height, rgba, x, y)) = composed {
+            if let Some((width, height, rgba, x, y, dense)) = composed {
                 // Native PAL draws ADV text windows above scene sprites but
                 // below the Game.exe button layer; the synthetic sprite must
                 // join the native depth band or it buries the ADV chrome.
@@ -2556,6 +2602,9 @@ impl ScriptRuntime {
                     "adv:text".to_owned(),
                 ) {
                     self.text_state.sprite = Some(handle);
+                }
+                if let (Some(handle), Some((density, dense))) = (self.text_state.sprite, dense) {
+                    sprites.set_sprite_hires(handle, density, dense);
                 }
                 self.text_state.presented_frame = Some(frame_key);
             }
@@ -2595,7 +2644,27 @@ impl ScriptRuntime {
             panel_text_height,
         );
         self.capture_tips_layout(body, &lines);
-        self.apply_tips_colors(body, &full_lines, &lines, text_width, text_height, &mut text_rgba);
+        self.apply_tips_colors(body, &full_lines, &lines, text_width, text_height, &mut text_rgba, 1);
+        let dense_text = self.dense_text_density().map(|density| {
+            let mut rgba = rasterize_text_block_dense(
+                &self.font_state,
+                &full_lines,
+                &lines,
+                text_width,
+                text_height,
+                density,
+            );
+            self.apply_tips_colors(
+                body,
+                &full_lines,
+                &lines,
+                text_width,
+                text_height,
+                &mut rgba,
+                density,
+            );
+            (density, rgba)
+        });
         let full_char_count = lines.iter().map(|line| line.char_count).sum();
         if let Some(manager) = resource_manager.as_mut() {
             self.ensure_wait_mark_sheet(manager);
@@ -2666,7 +2735,13 @@ impl ScriptRuntime {
         } else {
             text_origin_y
         };
+        let dense = dense_text.map(|(density, text_rgba)| AdvTextDenseLayer {
+            density,
+            panel_rgba: crate::scene::upscale_rgba(&panel_rgba, panel_width, panel_height, density),
+            text_rgba,
+        });
         self.text_state.render_cache = Some(AdvTextPanelCache {
+            dense,
             panel_width,
             panel_height,
             panel_rgba,
@@ -2696,6 +2771,9 @@ impl ScriptRuntime {
         self.font_state.set_font_size(22);
         let (name, _) = parse_pal_text_directives(name);
         let (name_width, name_height, name_rgba) = self.font_state.rasterize(&name);
+        let dense_name = self
+            .dense_text_density()
+            .map(|density| (density, self.font_state.rasterize_dense(&name, density).2));
         self.font_state.set_font_size(saved_size);
         self.font_state.set_color(saved_color.0, saved_color.1);
         let name_surface_width = name_width.max(1);
@@ -2764,6 +2842,9 @@ impl ScriptRuntime {
             "adv:name".to_owned(),
         ) {
             self.text_state.name_sprite = Some(handle);
+        }
+        if let (Some(handle), Some((density, dense))) = (self.text_state.name_sprite, dense_name) {
+            sprites.set_sprite_hires(handle, density, dense);
         }
     }
 
@@ -2962,6 +3043,21 @@ impl ScriptRuntime {
         state
     }
 
+    /// Set how densely host-drawn text is rasterized for the current window
+    /// (see `scene::text_density`). A change redraws the ADV text.
+    pub fn set_text_density(&mut self, density: u32) {
+        let density = density.clamp(1, crate::scene::MAX_TEXT_DENSITY);
+        if self.text_density != density {
+            self.text_density = density;
+            self.text_state.dirty = true;
+        }
+    }
+
+    /// Density for a host text surface: only outline faces gain detail.
+    fn dense_text_density(&self) -> Option<u32> {
+        (self.text_density > 1 && self.font_state.draws_outline_text()).then_some(self.text_density)
+    }
+
     /// Finish the typewriter reveal immediately.  Native completes the reveal
     /// in the same frame its text tick sees a non-zero skip state
     /// (0x42CE40), without advancing the parked wait by itself.
@@ -3002,14 +3098,10 @@ impl ScriptRuntime {
         let [left, top, right, bottom] = self.history_state.rect;
         let width = (right - left).max(1) as u32;
         let height = (bottom - top).max(1) as u32;
-        let mut rgba = vec![0_u8; (width * height * 4) as usize];
-
-        let saved_size = self.font_state.font_size();
-        let saved_color = self.font_state.color();
-        let (font_size, wrap_width, pitch, name_block, _, body_x, name_x) =
-            self.history_typeset_params();
-        self.font_state.set_font_size(font_size);
-
+        // The backlog page only changes with its inputs; redrawing it every
+        // frame is costly, more so at a HiDPI text density.
+        let typeset = self.history_typeset_params();
+        let (font_size, wrap_width, pitch, name_block, _, body_x, name_x) = typeset;
         // Native scroll positions are record indices: 0 anchors the newest
         // record at the bottom of the view, and each step toward `max` moves
         // one record further into the past.  Draw the window the shared
@@ -3017,6 +3109,40 @@ impl ScriptRuntime {
         // agree.
         let hovered = self.history_state.hovered_record;
         let (start, _end, tops) = self.history_visible_window(assets, nls);
+        let page_key = HistoryPageKey {
+            layout_generation: self
+                .history_state
+                .layout_cache
+                .as_ref()
+                .map_or(0, |cache| cache.generation),
+            rect: self.history_state.rect,
+            start,
+            tops: tops.clone(),
+            hovered,
+            colors: self.history_state.colors,
+            typeset,
+            density: self.dense_text_density().unwrap_or(1),
+        };
+        let z = history_text_render_priority(self.sprite_priority_cursor);
+        if let Some(handle) = self.history_state.sprite.filter(|handle| sprites.get(*handle).is_some()) {
+            if self.history_state.presented_page.as_ref() == Some(&page_key) {
+                let _ = sprites.set_pos(handle, left, top, 0);
+                let _ = sprites.set_priority(handle, z);
+                let _ = sprites.view_ctrl(handle, true);
+                return;
+            }
+        }
+        let mut rgba = vec![0_u8; (width * height * 4) as usize];
+        // The same page at the text density, drawn op for op alongside.
+        let mut dense = (page_key.density > 1).then(|| {
+            let density = page_key.density;
+            let len = (width * density) as usize * (height * density) as usize * 4;
+            (density, vec![0_u8; len])
+        });
+
+        let saved_size = self.font_state.font_size();
+        let saved_color = self.font_state.color();
+        self.font_state.set_font_size(font_size);
         let records = self
             .history_state
             .layout_cache
@@ -3046,6 +3172,15 @@ impl ScriptRuntime {
                         alpha_blend_rgba(&mut rgba[di..di + 4], &[0x4E, 0x4E, 0x4E, 0xFF]);
                     }
                 }
+                if let Some((d, dense)) = dense.as_mut() {
+                    let dense_width = width * *d;
+                    for by in plate_top * *d..(plate_top + plate_height).min(height) * *d {
+                        for bx in plate_left * *d..plate_right * *d {
+                            let di = ((by * dense_width + bx) * 4) as usize;
+                            alpha_blend_rgba(&mut dense[di..di + 4], &[0x4E, 0x4E, 0x4E, 0xFF]);
+                        }
+                    }
+                }
             }
             let text_color = if hovered_record {
                 hover_text_color
@@ -3065,6 +3200,20 @@ impl ScriptRuntime {
                     name_x.max(0) as u32,
                     record_top.max(0) as u32,
                 );
+                if let Some((d, dense)) = dense.as_mut() {
+                    let (line_width, line_height, line_rgba) =
+                        self.font_state.rasterize_dense(name, *d);
+                    blit_rgba(
+                        dense,
+                        width * *d,
+                        height * *d,
+                        &line_rgba,
+                        line_width,
+                        line_height,
+                        name_x.max(0) as u32 * *d,
+                        record_top.max(0) as u32 * *d,
+                    );
+                }
             }
             let mut y = body_top;
             for line in &record.body_lines {
@@ -3084,6 +3233,20 @@ impl ScriptRuntime {
                         body_x.max(0) as u32,
                         y.max(0) as u32,
                     );
+                    if let Some((d, dense)) = dense.as_mut() {
+                        let (line_width, line_height, line_rgba) =
+                            self.font_state.rasterize_dense(line, *d);
+                        blit_rgba(
+                            dense,
+                            width * *d,
+                            height * *d,
+                            &line_rgba,
+                            line_width,
+                            line_height,
+                            body_x.max(0) as u32 * *d,
+                            y.max(0) as u32 * *d,
+                        );
+                    }
                 }
                 y = y.saturating_add(pitch);
             }
@@ -3094,7 +3257,7 @@ impl ScriptRuntime {
 
         // The backlog overlays the ADV text window but stays under the native
         // button layer, following the popup lane the log screen opened on.
-        let z = history_text_render_priority(self.sprite_priority_cursor);
+        self.history_state.presented_page = Some(page_key);
         if let Some(handle) = self.history_state.sprite {
             let _ = sprites.replace_sprite_surface(handle, width, height, rgba, "history:text");
             let _ = sprites.set_pos(handle, left, top, 0);
@@ -3109,6 +3272,9 @@ impl ScriptRuntime {
             "history:text",
         ) {
             self.history_state.sprite = Some(handle);
+        }
+        if let (Some(handle), Some((density, dense))) = (self.history_state.sprite, dense) {
+            sprites.set_sprite_hires(handle, density, dense);
         }
     }
 
@@ -18070,6 +18236,43 @@ fn rasterize_text_block_with_layout(
     (width, height, rgba, layouts)
 }
 
+/// The text block `rasterize_text_block_with_layout` produced, drawn again
+/// at `density` texels per PAL pixel on the same line layout.
+fn rasterize_text_block_dense(
+    font: &PalFontSystem,
+    lines: &[String],
+    layouts: &[AdvTextLineLayout],
+    width: u32,
+    height: u32,
+    density: u32,
+) -> Vec<u8> {
+    let (width, height) = (width * density, height * density);
+    let mut rgba = vec![0_u8; (width * height * 4) as usize];
+    for (line, layout) in lines.iter().zip(layouts) {
+        if line.is_empty() {
+            continue;
+        }
+        let (line_width, line_height, line_rgba) = font.rasterize_dense(line, density);
+        let top = layout.y * density;
+        for sy in 0..line_height {
+            let dy = top + sy;
+            if dy >= height {
+                break;
+            }
+            for sx in 0..line_width.min(width) {
+                let si = ((sy * line_width + sx) * 4) as usize;
+                let src = &line_rgba[si..si + 4];
+                if src[3] == 0 {
+                    continue;
+                }
+                let di = ((dy * width + sx) * 4) as usize;
+                alpha_blend_rgba(&mut rgba[di..di + 4], src);
+            }
+        }
+    }
+    rgba
+}
+
 fn is_pal_text_tag(tag: &str) -> bool {
     let normalized = tag.trim().trim_start_matches('/').to_ascii_lowercase();
     normalized.is_empty()
@@ -18131,9 +18334,36 @@ fn compose_adv_text_frame(
     animation_progress: Option<u32>,
     wait_mark: Option<(u32, u32, Vec<u8>, u32, u32)>,
 ) -> (u32, u32, Vec<u8>, i32, i32) {
-    let mut rgba = cache.panel_rgba.clone();
-    let width = cache.panel_width;
-    let height = cache.panel_height;
+    let rgba = compose_adv_text_layer(
+        cache,
+        1,
+        &cache.panel_rgba,
+        &cache.text_rgba,
+        reveal_limit,
+        animation_progress,
+        wait_mark.as_ref(),
+    );
+    (cache.panel_width, cache.panel_height, rgba, cache.sprite_x, cache.sprite_y)
+}
+
+/// Compose one ADV text frame at `density` texels per PAL pixel from panel
+/// and text pixels of that density. Reveal limits, the animation threshold
+/// map and the wait mark stay in PAL units and are scaled here.
+#[allow(clippy::too_many_arguments)]
+fn compose_adv_text_layer(
+    cache: &AdvTextPanelCache,
+    density: u32,
+    panel_rgba: &[u8],
+    text_rgba: &[u8],
+    reveal_limit: Option<(usize, u32)>,
+    animation_progress: Option<u32>,
+    wait_mark: Option<&(u32, u32, Vec<u8>, u32, u32)>,
+) -> Vec<u8> {
+    let d = density.max(1);
+    let mut rgba = panel_rgba.to_vec();
+    let width = cache.panel_width * d;
+    let height = cache.panel_height * d;
+    let text_width = cache.text_width * d;
     for (index, line) in cache.lines.iter().enumerate() {
         let x_limit = match reveal_limit {
             None => u32::MAX,
@@ -18147,25 +18377,22 @@ fn compose_adv_text_frame(
                 }
             }
         };
-        let x_limit = x_limit.min(cache.text_width);
+        let x_limit = x_limit.min(cache.text_width).saturating_mul(d);
         if x_limit == 0 {
             continue;
         }
-        for sy in 0..line.height {
-            let dy = cache
-                .text_origin_y
-                .saturating_add(line.y)
-                .saturating_add(sy);
+        for sy in 0..line.height * d {
+            let dy = (cache.text_origin_y + line.y) * d + sy;
             if dy >= height {
                 break;
             }
             for sx in 0..x_limit {
-                let dx = cache.text_origin_x + sx;
+                let dx = cache.text_origin_x * d + sx;
                 if dx >= width {
                     break;
                 }
-                let si = (((line.y + sy) * cache.text_width + sx) * 4) as usize;
-                let Some(src) = cache.text_rgba.get(si..si + 4) else {
+                let si = (((line.y * d + sy) * text_width + sx) * 4) as usize;
+                let Some(src) = text_rgba.get(si..si + 4) else {
                     continue;
                 };
                 if src[3] == 0 {
@@ -18174,28 +18401,38 @@ fn compose_adv_text_frame(
                 let di = ((dy * width + dx) * 4) as usize;
                 let mut pixel: [u8; 4] = src.try_into().unwrap();
                 if let (Some(map), Some(progress)) = (&cache.thresholds, animation_progress) {
-                    pixel[3] = map.alpha(si / 4, pixel[3], progress);
+                    // The threshold map is indexed by PAL text pixels.
+                    let pal_index = (line.y + sy / d) * cache.text_width + sx / d;
+                    pixel[3] = map.alpha(pal_index as usize, pixel[3], progress);
                 }
                 alpha_blend_rgba(&mut rgba[di..di + 4], &pixel);
             }
         }
     }
     if let Some((mark_w, mark_h, mark_rgba, mark_x, mark_y)) = wait_mark {
+        let dense_mark;
+        let mark_rgba = if d > 1 {
+            dense_mark = crate::scene::upscale_rgba(mark_rgba, *mark_w, *mark_h, d);
+            &dense_mark
+        } else {
+            mark_rgba
+        };
         blit_rgba(
             &mut rgba,
             width,
             height,
-            &mark_rgba,
-            mark_w,
-            mark_h,
-            cache.text_origin_x.saturating_add(mark_x),
+            mark_rgba,
+            mark_w * d,
+            mark_h * d,
+            cache.text_origin_x.saturating_add(*mark_x) * d,
             cache
                 .text_origin_y
-                .saturating_add(mark_y)
-                .saturating_add(4),
+                .saturating_add(*mark_y)
+                .saturating_add(4)
+                * d,
         );
     }
-    (width, height, rgba, cache.sprite_x, cache.sprite_y)
+    rgba
 }
 
 fn alpha_blend_rgba(dst: &mut [u8], src: &[u8]) {
@@ -20256,6 +20493,7 @@ mod tests {
             px.copy_from_slice(&[200, 200, 200, 255]);
         }
         let cache = AdvTextPanelCache {
+            dense: None,
             thresholds: None,
             panel_width: 8,
             panel_height: 4,
@@ -20307,6 +20545,56 @@ mod tests {
         let (_, _, full, _, _) = compose_adv_text_frame(&cache, None, None, None);
         assert_eq!(panel_pixel(&full, 7, 1), vec![200, 200, 200, 255]);
         assert_eq!(panel_pixel(&full, 3, 2), vec![200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn dense_adv_text_layer_scales_reveal_geometry() {
+        fn magnify(rgba: &[u8], width: u32, height: u32, d: u32) -> Vec<u8> {
+            let mut out = vec![0u8; (width * d * height * d * 4) as usize];
+            for y in 0..height * d {
+                for x in 0..width * d {
+                    let si = (((y / d) * width + x / d) * 4) as usize;
+                    let di = ((y * width * d + x) * 4) as usize;
+                    out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+                }
+            }
+            out
+        }
+        let panel_rgba: Vec<u8> = (0..8 * 4).flat_map(|i| [i as u8, 16, 20, 255]).collect();
+        let text_rgba: Vec<u8> = (0..8 * 2).flat_map(|i| [200, i as u8 * 9, 200, 255]).collect();
+        let cache = AdvTextPanelCache {
+            dense: None,
+            thresholds: None,
+            panel_width: 8,
+            panel_height: 4,
+            panel_rgba: panel_rgba.clone(),
+            text_width: 8,
+            text_rgba: text_rgba.clone(),
+            text_origin_x: 1,
+            text_origin_y: 1,
+            lines: vec![
+                AdvTextLineLayout { y: 0, height: 1, char_start: 0, char_count: 4, char_x: vec![0, 2, 4, 6, 8] },
+                AdvTextLineLayout { y: 1, height: 1, char_start: 4, char_count: 2, char_x: vec![0, 2, 4] },
+            ],
+            full_char_count: 6,
+            sprite_x: 0,
+            sprite_y: 0,
+        };
+        // With magnified inputs, the dense layer must be the magnified
+        // logical frame: every PAL-unit offset and clip scales by d.
+        for reveal in [None, Some((0, 3)), Some((1, 1))] {
+            let (_, _, logical, _, _) = compose_adv_text_frame(&cache, reveal, None, None);
+            let dense = compose_adv_text_layer(
+                &cache,
+                3,
+                &magnify(&panel_rgba, 8, 4, 3),
+                &magnify(&text_rgba, 8, 2, 3),
+                reveal,
+                None,
+                None,
+            );
+            assert_eq!(dense, magnify(&logical, 8, 4, 3), "reveal {reveal:?}");
+        }
     }
 
     #[test]

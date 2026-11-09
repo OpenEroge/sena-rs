@@ -64,6 +64,9 @@ not new native-behavior or full-route evidence. See [CI scope](../platform/READM
   position queries now share the recovered tag/group/index interpretation.
   Full wrapper-bank parity remains open. Follow-up review also found a confirmed
   newer `3:4` arity/placement mismatch still requiring correction.
+- [HiDPI presentation](hidpi-presentation.md): letterboxed PAL viewport shared by
+  both renderers and the cursor mapping; ADV, name and backlog text rasterized at
+  the window's text density as generation-bound dense surface copies.
 - [Audio](bgm-byte-range-contract.md): BGM raw byte ranges, per-build flags and
   fades, reserved streaming records, native command queries, engine-clock fade
   envelopes, separate ratio storage, and known source buffer-format metadata.

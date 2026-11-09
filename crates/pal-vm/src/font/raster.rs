@@ -1,20 +1,17 @@
 use super::PalFontProfile;
 
-const CROSS: &[(i32, i32)] = &[(0, -1), (-1, 0), (1, 0), (0, 1)];
-const DIAMOND: &[(i32, i32)] = &[
-    (0, -2),
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-2, 0),
-    (-1, 0),
-    (1, 0),
-    (2, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-    (0, 2),
-];
+/// Native effect kernels are L1 balls around the effect origin: the outline
+/// (effect 1) has radius 1, the thick outline (effect 3) radius 2. A dense
+/// raster scales the radius with the density so the outline keeps its PAL
+/// pixel width. Stamps OR together, so their order does not matter.
+fn l1_ring(radius: i32) -> impl Iterator<Item = (i32, i32)> {
+    (-radius..=radius).flat_map(move |dy| {
+        let span = radius - dy.abs();
+        (-span..=span)
+            .filter(move |dx| (*dx, dy) != (0, 0))
+            .map(move |dx| (dx, dy))
+    })
+}
 
 #[derive(Clone, Copy)]
 enum Stamp {
@@ -41,10 +38,46 @@ pub(super) fn draw_glyph(
     effect: u16,
     profile: PalFontProfile,
 ) {
+    draw_glyph_dense(
+        pixels,
+        width,
+        height,
+        coverage,
+        coverage_stride,
+        coverage_height,
+        x,
+        y,
+        color,
+        effect_color,
+        effect,
+        profile,
+        1,
+    );
+}
+
+/// `draw_glyph` for coverage rasterized at `density` texels per PAL pixel:
+/// every native offset and kernel radius is scaled by the density.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_glyph_dense(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    coverage: &[u8],
+    coverage_stride: u32,
+    coverage_height: u32,
+    x: i32,
+    y: i32,
+    color: u32,
+    effect_color: u32,
+    effect: u16,
+    profile: PalFontProfile,
+    density: i32,
+) {
     if effect > 3 || (effect == 3 && profile == PalFontProfile::Koikake) {
         return;
     }
-    let foreground_offset = if effect == 3 { 2 } else { 1 };
+    let density = density.max(1);
+    let foreground_offset = if effect == 3 { 2 } else { 1 } * density;
     let mut stamp = |offset_x: i32, offset_y: i32, color: u32, mode: Stamp| {
         for source_y in 0..coverage_height {
             for source_x in 0..coverage_stride {
@@ -95,17 +128,32 @@ pub(super) fn draw_glyph(
     };
     match effect {
         1 => {
-            for &(dx, dy) in CROSS {
-                stamp(1 + dx, 1 + dy, effect_color, Stamp::Or);
+            for (dx, dy) in l1_ring(density) {
+                stamp(density + dx, density + dy, effect_color, Stamp::Or);
             }
         }
-        2 => stamp(2, 2, effect_color, Stamp::Overwrite),
+        2 => stamp(2 * density, 2 * density, effect_color, Stamp::Overwrite),
         3 => {
-            for &(dx, dy) in DIAMOND {
-                stamp(2 + dx, 2 + dy, effect_color, Stamp::Or);
+            for (dx, dy) in l1_ring(2 * density) {
+                stamp(2 * density + dx, 2 * density + dy, effect_color, Stamp::Or);
             }
         }
         _ => {}
     }
     stamp(foreground_offset, foreground_offset, color, Stamp::Blend);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::l1_ring;
+
+    #[test]
+    fn unit_kernels_match_the_native_cross_and_diamond() {
+        let mut cross: Vec<_> = l1_ring(1).collect();
+        cross.sort();
+        assert_eq!(cross, vec![(-1, 0), (0, -1), (0, 1), (1, 0)]);
+        let diamond: Vec<_> = l1_ring(2).collect();
+        assert_eq!(diamond.len(), 12);
+        assert!(diamond.iter().all(|(x, y)| x.abs() + y.abs() <= 2 && (*x, *y) != (0, 0)));
+    }
 }

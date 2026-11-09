@@ -136,6 +136,12 @@ struct Args {
     #[arg(long, value_parser = parse_diagnostic_png_at)]
     window_dump_frame_at: Vec<DiagnosticPngAt>,
 
+    /// Emulate a physical window of WIDTHxHEIGHT device pixels in --headless
+    /// runs: input maps through it and PNG snapshots are composited at that
+    /// size (letterboxed), e.g. 2560x1440 for a 2x HiDPI display.
+    #[arg(long, value_parser = parse_device_size)]
+    diagnostic_device_size: Option<(u32, u32)>,
+
     /// Inject headless clicks as frame:x:y in PAL logical coordinates. Can be passed more than once.
     #[arg(long, value_parser = parse_diagnostic_click)]
     diagnostic_click: Vec<DiagnosticClick>,
@@ -223,6 +229,7 @@ fn main() -> anyhow::Result<()> {
         diagnostic_png: args.diagnostic_png,
         diagnostic_png_at: args.diagnostic_png_at,
         window_dump_frame_at: args.window_dump_frame_at,
+        diagnostic_device_size: args.diagnostic_device_size,
         diagnostic_clicks: args
             .diagnostic_click
             .iter()
@@ -247,6 +254,17 @@ fn diagnostic_key_events(args: &Args) -> Vec<DiagnosticKeyEvent> {
     }
     events.sort_by_key(|event| (event.frame, !event.pressed));
     events
+}
+
+fn parse_device_size(raw: &str) -> Result<(u32, u32), String> {
+    let (width, height) = raw
+        .split_once(['x', 'X'])
+        .ok_or_else(|| "expected WIDTHxHEIGHT".to_owned())?;
+    let parse = |value: &str| match value.parse::<u32>() {
+        Ok(value) if (1..=16384).contains(&value) => Ok(value),
+        _ => Err(format!("invalid device dimension {value:?}")),
+    };
+    Ok((parse(width)?, parse(height)?))
 }
 
 fn parse_diagnostic_click(raw: &str) -> Result<DiagnosticClick, String> {

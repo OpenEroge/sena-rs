@@ -9,7 +9,7 @@ mod target_render;
 
 use crate::msprite::MSpriteHandle;
 use crate::scene::{
-    DrawCommand, RectF, SceneTexture, SceneTextureFormat, SceneTextureId, SpriteDraw,
+    DrawCommand, HiresPixels, RectF, SceneTexture, SceneTextureFormat, SceneTextureId, SpriteDraw,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -167,7 +167,7 @@ impl SpriteSystem {
         if expected == 0 || pixels.len() != expected { return None; }
         let id = self.allocate_surface_id();
         self.insert_texture(SceneTexture { id: SceneTextureId(id.0), generation: 1,
-            width, height, format: SceneTextureFormat::Rgba8, pixels });
+            width, height, format: SceneTextureFormat::Rgba8, pixels, hires: None });
         let mut desc = SpriteDesc::new(SceneTextureId(id.0), width, height);
         desc.position = position;
         desc.base_priority = priority;
@@ -197,6 +197,17 @@ impl SpriteSystem {
             priority,
             source_name,
         )
+    }
+
+    /// Attach a dense copy of a host-rendered sprite's current surface (see
+    /// `SpriteSurface::set_hires`). Returns false and keeps the plain
+    /// surface when the copy does not fit.
+    pub fn set_sprite_hires(&mut self, handle: SpriteHandle, density: u32, pixels: Vec<u8>) -> bool {
+        let Some(surface_id) = self.get(handle).map(|sprite| sprite.surface) else {
+            return false;
+        };
+        self.surface_mut(surface_id)
+            .is_some_and(|surface| surface.set_hires(density, pixels))
     }
 
     pub fn create_msprite(
@@ -2529,6 +2540,9 @@ pub struct SpriteSurface {
     pub format: SceneTextureFormat,
     pub pixels: Arc<Vec<u8>>,
     pub dirty: bool,
+    /// Dense copy of `pixels`, valid only while `generation` is unchanged:
+    /// any later pixel edit bumps the generation and drops back to `pixels`.
+    hires: Option<(u64, HiresPixels)>,
 }
 
 impl SpriteSurface {
@@ -2542,6 +2556,7 @@ impl SpriteSurface {
             format: texture.format,
             pixels: texture.pixels,
             dirty: false,
+            hires: None,
         }
     }
 
@@ -2578,6 +2593,7 @@ impl SpriteSurface {
             format: SceneTextureFormat::Rgba8,
             pixels: Arc::new(pixels),
             dirty: false,
+            hires: None,
         })
     }
 
@@ -2607,7 +2623,38 @@ impl SpriteSurface {
             height: self.height,
             format: self.format,
             pixels: self.pixels.clone(),
+            hires: self.hires().cloned(),
         }
+    }
+
+    /// The dense copy, if it still matches the current pixels.
+    pub fn hires(&self) -> Option<&HiresPixels> {
+        self.hires
+            .as_ref()
+            .filter(|(generation, _)| *generation == self.generation)
+            .map(|(_, hires)| hires)
+    }
+
+    /// Attach a dense copy of the current pixels. It must be exactly
+    /// `density` times this surface's size; anything else is rejected.
+    pub fn set_hires(&mut self, density: u32, pixels: Vec<u8>) -> bool {
+        let expected = (self.width as usize * density as usize)
+            .checked_mul(self.height as usize * density as usize)
+            .and_then(|texels| texels.checked_mul(4));
+        if !(2..=crate::scene::MAX_TEXT_DENSITY).contains(&density)
+            || expected != Some(pixels.len())
+        {
+            self.hires = None;
+            return false;
+        }
+        self.hires = Some((
+            self.generation,
+            HiresPixels {
+                density,
+                pixels: Arc::new(pixels),
+            },
+        ));
+        true
     }
 }
 
@@ -2904,6 +2951,27 @@ mod tests {
                 SpriteSurface::rgba8(SpriteSurfaceId(1), 1, width, height, Vec::new()).is_err()
             );
         }
+    }
+
+    #[test]
+    fn dense_copy_is_dropped_by_any_pixel_edit() {
+        let mut sprites = SpriteSystem::new();
+        let handle = sprites
+            .create_rgba_sprite(2, 1, vec![1; 8], PalVec3::new(0, 0, 0), 0, "text")
+            .unwrap();
+        // Wrong sizes are rejected; an exact 2x copy is used for rendering.
+        assert!(!sprites.set_sprite_hires(handle, 2, vec![0; 8]));
+        assert!(sprites.set_sprite_hires(handle, 2, vec![7; 4 * 2 * 4]));
+        let surface_id = sprites.get(handle).unwrap().surface;
+        let texture = sprites.surface(surface_id).unwrap().to_scene_texture();
+        let (width, height, density, pixels) = texture.device_texels();
+        assert_eq!((width, height, density, pixels[0]), (4, 2, 2, 7));
+        assert_eq!((texture.width, texture.height), (2, 1));
+        // Editing the plain pixels invalidates the copy.
+        sprites.surface_mut(surface_id).unwrap().pixels_mut()[0] = 9;
+        let texture = sprites.surface(surface_id).unwrap().to_scene_texture();
+        assert!(texture.hires.is_none());
+        assert_eq!(texture.device_texels().0, 2);
     }
 
     #[test]

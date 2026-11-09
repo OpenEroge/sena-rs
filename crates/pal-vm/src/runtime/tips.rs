@@ -185,6 +185,7 @@ impl ScriptRuntime {
         width: u32,
         height: u32,
         rgba: &mut [u8],
+        density: u32,
     ) {
         if !self.tips_state.custom_colors {
             return;
@@ -198,9 +199,14 @@ impl ScriptRuntime {
             self.tips_state.colors[0] as u32,
             self.tips_state.colors[1] as u32,
         );
-        let (_, _, colored, _) =
-            rasterize_text_block_with_layout(&self.font_state, lines, width, height);
+        let colored = if density > 1 {
+            super::rasterize_text_block_dense(&self.font_state, lines, layout, width, height, density)
+        } else {
+            rasterize_text_block_with_layout(&self.font_state, lines, width, height).2
+        };
         self.font_state.set_color(saved.0, saved.1);
+        // `rgba` and `colored` are both `density` times the PAL block.
+        let (d, width, height) = (density.max(1), width * density.max(1), height * density.max(1));
         for span in spans {
             let start = visible_tip_offset(&body[..span.start]);
             let end = visible_tip_offset(&body[..span.end]);
@@ -210,9 +216,9 @@ impl ScriptRuntime {
                 if from >= to {
                     continue;
                 }
-                let left = line.char_x[from - line.char_start].min(width);
-                let right = line.char_x[to - line.char_start].min(width);
-                for y in line.y..line.y.saturating_add(line.height).min(height) {
+                let left = (line.char_x[from - line.char_start] * d).min(width);
+                let right = (line.char_x[to - line.char_start] * d).min(width);
+                for y in line.y * d..(line.y + line.height).saturating_mul(d).min(height) {
                     let from = ((y * width + left) * 4) as usize;
                     let to = ((y * width + right) * 4) as usize;
                     rgba[from..to].copy_from_slice(&colored[from..to]);
@@ -831,7 +837,7 @@ mod tests {
             rasterize_text_block_with_layout(&vm.font_state, &lines, width, height);
         let original = pixels.clone();
         call(&mut vm, 42, &[0xffff0000_u32 as i32, 0xff0000ff_u32 as i32]);
-        vm.apply_tips_colors(body, &lines, &layout, width, height, &mut pixels);
+        vm.apply_tips_colors(body, &lines, &layout, width, height, &mut pixels, 1);
         assert_ne!(pixels, original);
         let left = layout[0].char_x[1];
         let right = layout[0].char_x[3];
@@ -848,7 +854,7 @@ mod tests {
         assert_eq!(vm.font_state.color(), (0xffffffff, 0xff000000));
         call(&mut vm, 42, &[-1, 0]);
         let mut disabled = original.clone();
-        vm.apply_tips_colors(body, &lines, &layout, width, height, &mut disabled);
+        vm.apply_tips_colors(body, &lines, &layout, width, height, &mut disabled, 1);
         assert_eq!(disabled, original);
     }
 

@@ -434,15 +434,24 @@ impl PalInputState {
     }
 
     fn map_physical_to_logical(&self, x: f64, y: f64) -> (i32, i32) {
-        fn axis(value: f64, window: u32, logical: u32) -> i32 {
+        fn axis(value: f64, origin: f32, span: f32, logical: u32) -> i32 {
             if logical == 0 {
                 return value as i32;
             }
-            let mapped = (value as f32 * (logical as f32 / window.max(1) as f32)) as i32;
+            // Native truncates toward zero and keeps signed off-screen values.
+            let mapped = ((value as f32 - origin) * (logical as f32 / span.max(1.0))) as i32;
             let extent = logical.min(i32::MAX as u32) as i32;
             if mapped >= extent || mapped < -extent { -1 } else { mapped }
         }
-        (axis(x, self.window_width, self.logical_width), axis(y, self.window_height, self.logical_height))
+        // The renderer letterboxes the PAL screen; map through the same rect.
+        let viewport = crate::scene::letterbox_rect(
+            [self.window_width, self.window_height],
+            [self.logical_width, self.logical_height],
+        );
+        (
+            axis(x, viewport.x, viewport.w, self.logical_width),
+            axis(y, viewport.y, viewport.h, self.logical_height),
+        )
     }
 
     /// Process a mouse wheel event.
@@ -652,6 +661,24 @@ mod native_input_tests {
         input.handle_keyboard_event("Return", false);
         input.handle_mouse_button_event(MouseButton::Left, false);
         assert_eq!(input.raw_key_pull(), 4 | (1 << 23));
+    }
+
+    #[test]
+    fn cursor_maps_through_the_letterboxed_pal_screen() {
+        let mut input = PalInputState::new();
+        // 2x HiDPI, same aspect: device pixels halve.
+        input.set_coordinate_space(2560, 1440, 1280, 720);
+        input.handle_cursor_moved(1281.0, 1439.0);
+        assert_eq!(input.mouse_position(), (640, 719));
+        // 3024x1964 has 131 device rows of bar above the screen.
+        input.set_coordinate_space(3024, 1964, 1280, 720);
+        input.handle_cursor_moved(0.0, 131.0);
+        assert_eq!(input.mouse_position(), (0, 0));
+        input.handle_cursor_moved(3023.0, 131.0 + 1700.0);
+        assert_eq!(input.mouse_position(), (1279, 719));
+        // The bars themselves are outside the PAL screen.
+        input.handle_cursor_moved(100.0, 1900.0);
+        assert_eq!(input.mouse_position().1, -1);
     }
 
     #[test]

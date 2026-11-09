@@ -399,6 +399,59 @@ impl PalFontSystem {
         })
     }
 
+    /// Whether plain text would be drawn from an outline face, which can be
+    /// rasterized again at a higher density. Bitmap fonts cannot.
+    pub fn draws_outline_text(&self) -> bool {
+        self.font_size != 0 && self.bitmap("\u{3042}").is_none() && self.bitmap("A").is_none()
+    }
+
+    /// `rasterize` at `density` texels per PAL pixel. The result is exactly
+    /// `density` times the size `rasterize` returns, with glyphs at the same
+    /// PAL positions. Outline text is drawn again at the larger size; bitmap
+    /// glyphs and native markup are magnified, since they have no outlines.
+    pub fn rasterize_dense(&self, text: &str, density: u32) -> (u32, u32, Vec<u8>) {
+        let (width, height, pixels) = self.rasterize(text);
+        let density = density.clamp(1, crate::scene::MAX_TEXT_DENSITY);
+        if density == 1 {
+            return (width, height, pixels);
+        }
+        let font_size = self.layout_font_size();
+        if font_size == 0 || self.has_native_markup(text) || self.bitmap(text).is_some() {
+            let dense = crate::scene::upscale_rgba(&pixels, width, height, density);
+            return (width * density, height * density, dense);
+        }
+        let (dense_width, dense_height) = (width * density, height * density);
+        let mut dense = vec![0; dense_width as usize * dense_height as usize * 4];
+        let step = i32::from(font_size) * density as i32;
+        let mut y = 0_i32;
+        for line in text.split(['\r', '\n']) {
+            let (source_width, source_height, source) =
+                self.fallback
+                    .rasterize_line(line, f32::from(font_size) * density as f32, [255; 4]);
+            let coverage: Vec<_> = source
+                .chunks_exact(4)
+                .map(|pixel| ((u16::from(pixel[3]) + 3) / 4) as u8)
+                .collect();
+            raster::draw_glyph_dense(
+                &mut dense,
+                dense_width,
+                dense_height,
+                &coverage,
+                source_width,
+                source_height,
+                0,
+                y,
+                self.color,
+                self.effect_color,
+                self.effect,
+                self.profile,
+                density as i32,
+            );
+            y = y.wrapping_add(step);
+        }
+        (dense_width, dense_height, dense)
+    }
+
     pub fn try_rasterize(&self, text: &str) -> Result<(u32, u32, Vec<u8>), &'static str> {
         if self.has_native_markup(text) {
             return self.rasterize_markup(text);
@@ -646,6 +699,36 @@ fn argb_to_rgba(color: u32) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dense_outline_text_is_an_exact_multiple_and_sharper() {
+        let mut font = PalFontSystem::new();
+        font.set_type(1);
+        font.set_font_size(20);
+        font.set_color(0xFFFF_FFFF, 0xFF00_0000);
+        assert!(font.draws_outline_text());
+        let (width, height, plain) = font.rasterize("Ab");
+        let (dense_width, dense_height, dense) = font.rasterize_dense("Ab", 2);
+        assert_eq!((dense_width, dense_height), (width * 2, height * 2));
+        assert_eq!(dense.len(), (dense_width * dense_height * 4) as usize);
+        // Ink lands in the same place: compare coverage per PAL pixel.
+        let ink = |rgba: &[u8], w: u32, x: u32, y: u32| rgba[((y * w + x) * 4 + 3) as usize] > 128;
+        let mut agree = 0;
+        let mut inked = 0;
+        for y in 0..height {
+            for x in 0..width {
+                if ink(&plain, width, x, y) {
+                    inked += 1;
+                    agree += u32::from((0..2).any(|dy| {
+                        (0..2).any(|dx| ink(&dense, dense_width, x * 2 + dx, y * 2 + dy))
+                    }));
+                }
+            }
+        }
+        assert!(inked > 0 && agree * 10 >= inked * 9, "{agree}/{inked}");
+        // Density 1 is the plain raster.
+        assert_eq!(font.rasterize_dense("Ab", 1).2, plain);
+    }
 
     fn fixture(base: i32, ascent: i32, advance_x: i16, advance_y: i16, coverage: &[u8]) -> Vec<u8> {
         let table_end = 0x108_u32;

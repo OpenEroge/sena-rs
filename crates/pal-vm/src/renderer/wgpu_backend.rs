@@ -12,7 +12,9 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::scene::{DrawCommand, FrameScene, SceneTexture, SceneTextureId, SpriteDraw};
+use crate::scene::{
+    letterbox_rect, DrawCommand, FrameScene, RectF, SceneTexture, SceneTextureId, SpriteDraw,
+};
 
 use super::{
     pal_device_rect_to_clip_quad, scaled_rect, shader_source, RenderOutcome, ShaderProgram,
@@ -248,6 +250,7 @@ pub struct WgpuBackend {
     textures: HashMap<SceneTextureId, GpuTexture>,
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: u64,
+    captured: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl WgpuBackend {
@@ -461,6 +464,7 @@ impl WgpuBackend {
             textures: HashMap::new(),
             vertex_buffer,
             vertex_capacity,
+            captured: None,
         })
     }
 
@@ -509,10 +513,11 @@ impl WgpuBackend {
                 .any(|texture| texture.id == *texture_id)
         });
         for texture in &scene.textures {
+            let (width, height, _, _) = texture.device_texels();
             let needs_upload = self.textures.get(&texture.id).is_none_or(|cached| {
                 cached.generation != texture.generation
-                    || cached.width != texture.width
-                    || cached.height != texture.height
+                    || cached.width != width
+                    || cached.height != height
             });
             if !needs_upload {
                 continue;
@@ -529,21 +534,22 @@ impl WgpuBackend {
     }
 
     fn upload_texture(&self, texture: &SceneTexture) -> anyhow::Result<GpuTexture> {
-        if texture.width == 0 || texture.height == 0 {
+        let (width, height, _, pixels) = texture.device_texels();
+        if width == 0 || height == 0 {
             anyhow::bail!("texture {:?} has an empty size", texture.id);
         }
-        let expected = texture.width as usize * texture.height as usize * 4;
-        if texture.pixels.len() != expected {
+        let expected = width as usize * height as usize * 4;
+        if pixels.len() != expected {
             anyhow::bail!(
                 "texture {:?} has {} bytes, expected {}",
                 texture.id,
-                texture.pixels.len(),
+                pixels.len(),
                 expected
             );
         }
         let size = wgpu::Extent3d {
-            width: texture.width,
-            height: texture.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         };
         let gpu_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -563,19 +569,19 @@ impl WgpuBackend {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &texture.pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(texture.width * 4),
-                rows_per_image: Some(texture.height),
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
             },
             size,
         );
         let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(GpuTexture {
             generation: texture.generation,
-            width: texture.width,
-            height: texture.height,
+            width,
+            height,
             bind_nearest: Self::bind_texture(
                 &self.device,
                 &self.texture_bind_layout,
@@ -595,17 +601,35 @@ impl WgpuBackend {
         &mut self,
         scene: &FrameScene,
         fallback_clear: wgpu::Color,
+        capture: bool,
     ) -> anyhow::Result<RenderOutcome> {
         let resolved = crate::scene::resolve_raster_stage(scene);
         let scene = resolved.as_ref();
         self.sync_textures(scene);
+        // All PAL geometry is built in viewport space; the render pass
+        // viewport places it letterboxed inside the surface.
+        let viewport = letterbox_rect(
+            [self.config.width, self.config.height],
+            [scene.logical_width.max(1), scene.logical_height.max(1)],
+        );
         let scale = [
-            self.config.width as f32 / scene.logical_width.max(1) as f32,
-            self.config.height as f32 / scene.logical_height.max(1) as f32,
+            viewport.w / scene.logical_width.max(1) as f32,
+            viewport.h / scene.logical_height.max(1) as f32,
         ];
-        let surface_size = [self.config.width, self.config.height];
-        let mut vertices: Vec<SpriteVertex> = Vec::with_capacity(scene.commands.len() * 6);
-        let mut spans: Vec<DrawSpan> = Vec::with_capacity(scene.commands.len());
+        let surface_size = [viewport.w as u32, viewport.h as u32];
+        let clear = scene_clear_color(scene, fallback_clear);
+        let mut vertices: Vec<SpriteVertex> = Vec::with_capacity(scene.commands.len() * 6 + 6);
+        let mut spans: Vec<DrawSpan> = Vec::with_capacity(scene.commands.len() + 1);
+        // The scene clear color covers the PAL screen only; bars stay black.
+        push_quad_vertices(
+            &mut vertices,
+            &mut spans,
+            SpanBinding::White,
+            RectF::new(0.0, 0.0, viewport.w, viewport.h),
+            surface_size,
+            [0.0, 0.0, 1.0, 1.0],
+            [clear.r as f32, clear.g as f32, clear.b as f32, 1.0],
+        );
         for command in &scene.commands {
             match command {
                 DrawCommand::Sprite(sprite) => {
@@ -653,76 +677,178 @@ impl WgpuBackend {
                 })
             })
             .collect();
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.reconfigure();
-                return Ok(RenderOutcome::Reconfigured);
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(RenderOutcome::Skipped);
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                anyhow::bail!("surface validation error while acquiring the next frame");
-            }
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let clear = scene_clear_color(scene, fallback_clear);
+        // A diagnostic capture renders offscreen, so it does not depend on
+        // the window surface being presentable (hidden windows are occluded).
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pal frame encoder"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pal frame pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipelines[1]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            for (span_index, span) in spans.iter().enumerate() {
-                let bind_group = match span.binding {
-                    SpanBinding::Nearest(texture_id) => self
-                        .textures
-                        .get(&texture_id)
-                        .map(|texture| &texture.bind_nearest),
-                    SpanBinding::Linear(texture_id) => self
-                        .textures
-                        .get(&texture_id)
-                        .map(|texture| &texture.bind_linear),
-                    SpanBinding::White => Some(&self.white_bind_nearest),
-                };
-                let Some(bind_group) = bind_group else {
-                    continue;
-                };
-                if let Some(raster) = &raster_bindings[span_index] {
-                    pass.set_pipeline(&self.raster_pipelines[span.mode]);
-                    pass.set_bind_group(1, raster, &[]);
-                } else {
-                    pass.set_pipeline(&self.pipelines[span.mode]);
-                }
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.draw(span.first_vertex..span.first_vertex + 6, 0..1);
+        let pending_capture =
+            capture.then(|| self.record_capture(&mut encoder, viewport, &spans, &raster_bindings));
+        let (frame, outcome) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (Some(frame), RenderOutcome::Rendered),
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.reconfigure();
+                (None, RenderOutcome::Reconfigured)
             }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                (None, RenderOutcome::Skipped)
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                anyhow::bail!("surface validation error while acquiring the next frame");
+            }
+        };
+        if let Some(frame) = &frame {
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(&mut encoder, &view, viewport, &spans, &raster_bindings);
+        }
+        if frame.is_none() && pending_capture.is_none() {
+            return Ok(outcome);
         }
         self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
-        Ok(RenderOutcome::Rendered)
+        if let Some(frame) = frame {
+            self.queue.present(frame);
+        }
+        self.captured = pending_capture.and_then(|capture| match capture.read(&self.device) {
+            Ok(rgba) => Some(rgba),
+            Err(err) => {
+                log::error!("GPU frame readback failed: {err:#}");
+                None
+            }
+        });
+        Ok(outcome)
+    }
+
+    /// The RGBA surface pixels of the last frame rendered with `capture`.
+    pub fn take_captured_frame(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+        self.captured.take()
+    }
+
+    fn record_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        viewport: RectF,
+        spans: &[DrawSpan],
+        raster_bindings: &[Option<wgpu::BindGroup>],
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("pal frame pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_viewport(viewport.x, viewport.y, viewport.w, viewport.h, 0.0, 1.0);
+        pass.set_scissor_rect(
+            viewport.x as u32,
+            viewport.y as u32,
+            viewport.w as u32,
+            viewport.h as u32,
+        );
+        pass.set_pipeline(&self.pipelines[1]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        for (span_index, span) in spans.iter().enumerate() {
+            let bind_group = match span.binding {
+                SpanBinding::Nearest(texture_id) => self
+                    .textures
+                    .get(&texture_id)
+                    .map(|texture| &texture.bind_nearest),
+                SpanBinding::Linear(texture_id) => self
+                    .textures
+                    .get(&texture_id)
+                    .map(|texture| &texture.bind_linear),
+                SpanBinding::White => Some(&self.white_bind_nearest),
+            };
+            let Some(bind_group) = bind_group else {
+                continue;
+            };
+            if let Some(raster) = &raster_bindings[span_index] {
+                pass.set_pipeline(&self.raster_pipelines[span.mode]);
+                pass.set_bind_group(1, raster, &[]);
+            } else {
+                pass.set_pipeline(&self.pipelines[span.mode]);
+            }
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(span.first_vertex..span.first_vertex + 6, 0..1);
+        }
+    }
+
+    /// Record the same frame into an offscreen twin of the surface and copy
+    /// it to a mappable buffer, so diagnostic dumps show the real GPU output.
+    fn record_capture(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        viewport: RectF,
+        spans: &[DrawSpan],
+        raster_bindings: &[Option<wgpu::BindGroup>],
+    ) -> FrameCapture {
+        let (width, height) = (self.config.width, self.config.height);
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pal frame capture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(encoder, &view, viewport, spans, raster_bindings);
+        let padded_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pal frame capture buffer"),
+            size: u64::from(padded_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            size,
+        );
+        FrameCapture {
+            buffer,
+            width,
+            height,
+            padded_row,
+            bgra: matches!(
+                self.config.format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            ),
+        }
     }
 
     fn push_sprite(
@@ -797,6 +923,46 @@ impl WgpuBackend {
                 vertex.position = quad[index];
             }
         }
+    }
+}
+
+/// A frame copy waiting in a mappable buffer (rows padded for the copy).
+struct FrameCapture {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: u32,
+    bgra: bool,
+}
+
+impl FrameCapture {
+    fn read(self, device: &wgpu::Device) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.buffer.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        receiver.recv()??;
+        let mapped = self
+            .buffer
+            .get_mapped_range(..)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let mut rgba = Vec::with_capacity(self.width as usize * self.height as usize * 4);
+        for row in mapped.chunks_exact(self.padded_row as usize) {
+            for pixel in row[..self.width as usize * 4].chunks_exact(4) {
+                let (r, g, b) = if self.bgra {
+                    (pixel[2], pixel[1], pixel[0])
+                } else {
+                    (pixel[0], pixel[1], pixel[2])
+                };
+                rgba.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+        drop(mapped);
+        self.buffer.unmap();
+        Ok((self.width, self.height, rgba))
     }
 }
 
