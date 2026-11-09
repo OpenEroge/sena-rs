@@ -5,6 +5,7 @@
 
 pub mod abi;
 pub mod animation;
+pub mod ani;
 #[cfg(feature = "desktop")]
 pub mod app;
 pub mod assets;

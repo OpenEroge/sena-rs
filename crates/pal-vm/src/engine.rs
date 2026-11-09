@@ -652,6 +652,7 @@ impl Engine {
             voice_active,
         );
         self.sprites.set_fx_time(self.task_system.pal_time_ms);
+        self.sprites.set_motion_skipping(skip_active);
         self.sprites.advance_motion_entries(delta_ms);
         // Native completes in-flight sprite transitions on the same frame a
         // skip state is active instead of playing the remaining frames out.

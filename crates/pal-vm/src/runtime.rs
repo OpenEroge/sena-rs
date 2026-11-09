@@ -8802,7 +8802,7 @@ impl ScriptRuntime {
             8 => self.ext_sp_get_filename(sprites),
             9 => self.ext_sp_set_center(sprites),
             12 => self.ext_sprite_filter(sprites),
-            14 => self.ext_sp_move_ex(sprites),
+            14 => self.ext_sp_move_ex(assets, sprites),
             15 => self.ext_sp_set_rect_pos(sprites),
             16 => self.ext_sp_set_render_mode(sprites),
             17 => self.ext_sp_set_scale(sprites),
@@ -8821,6 +8821,7 @@ impl ScriptRuntime {
             30 => self.ext_sp_get_dimension(sprites, false),
             31 => self.ext_sp_surface_image(assets, nls, resource_manager, sprites),
             32 => self.ext_sp_create(sprites),
+            33 => self.ext_sp_anime_clear(sprites),
             34 => self.ext_sp_set_anim_param(),
             35 => self.ext_sp_get_anim_param(),
             36 => self.ext_sp_get_scale(sprites),
@@ -10993,40 +10994,19 @@ impl ScriptRuntime {
         }
     }
 
+    /// Start a `.ani` motion program on a sprite. Returns false when the
+    /// bytes are not a motion program or the sprite is gone.
     fn apply_named_sprite_animation(
         &self,
         sprites: &mut SpriteSystem,
         handle: SpriteHandle,
         bytes: &[u8],
     ) -> bool {
-        let Some(anim) = parse_named_sprite_animation(bytes) else {
-            return false;
-        };
-        match anim {
-            NamedSpriteAnimation::MoveBy {
-                dx,
-                dy,
-                dz,
-                duration_ms,
-            } => sprites.tween_pos_by(handle, dx as f32, dy as f32, dz as f32, duration_ms),
-            NamedSpriteAnimation::ScaleBy {
-                delta_percent,
-                duration_ms,
-            } => {
-                let Some(sprite) = sprites.get(handle) else {
-                    return false;
-                };
-                let to = (sprite.scale + delta_percent as f32 / 100.0).max(0.01);
-                sprites.tween_scale_to(handle, to, duration_ms)
-            }
-            NamedSpriteAnimation::AlphaBy { delta, duration_ms } => {
-                let Some(sprite) = sprites.get(handle) else {
-                    return false;
-                };
-                let alpha = i32::from(sprite.color.alpha())
-                    .saturating_add(delta)
-                    .clamp(0, 255) as u8;
-                sprites.tween_alpha_to(handle, alpha, duration_ms)
+        match crate::ani::AniProgram::parse(bytes) {
+            Ok(program) => sprites.start_motion(handle, program),
+            Err(error) => {
+                log::debug!("[trace-sprite] motion program rejected: {error}");
+                false
             }
         }
     }
@@ -11512,13 +11492,12 @@ impl ScriptRuntime {
         ExtCallOutcome::Value(1)
     }
 
-    /// Category 3 index 14 is still Blocked.  The latest name table calls it
-    /// `SpMoveEx`, but Game.sqlite handler `sub_427E90` writes the wrapper
-    /// rotation lanes, not x/y/z position (`wrapper[10..12]` and float lanes
-    /// `33..35`).  Applying it as movement corrupts scene placement, so the
-    /// portable runtime keeps the observable stack discipline and records the
-    /// values until the dispatch-table/name conflict is resolved against the IDB.
-    fn ext_sp_move_ex(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+    /// Category 3 index 14. Game.sqlite handler `sub_427E90` writes the
+    /// wrapper rotation lanes (`wrapper[10..12]`, float lanes `33..35`);
+    /// trenka.exe 0x429060 ("sp_set_pos_ex") writes the position layer
+    /// (`wrapper[4..6]`, float lanes `27..29`) instead. The layer is
+    /// absolute and composes with the base position.
+    fn ext_sp_move_ex(&mut self, assets: &CoreAssets, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
         let args = self.pop_ext_args(4);
         let (Some(slot), Some(x), Some(y), Some(z)) = (
             args.first().copied(),
@@ -11529,11 +11508,15 @@ impl ScriptRuntime {
             return ExtCallOutcome::Block;
         };
         log::debug!(
-            "[trace-sprite] sp_move_ex/rotate-conflict pc=0x{:08X} slot={slot} args=({x},{y},{z})",
+            "[trace-sprite] sp_move_ex pc=0x{:08X} slot={slot} args=({x},{y},{z})",
             self.pc
         );
         if let (Some(handle), Some(sprites)) = (self.game_sprites.get(&slot).copied(), sprites) {
-            sprites.set_rotate_ex(handle, x as f32, y as f32, z as f32);
+            if assets.native_build.sprite_pos_ex_layer() {
+                sprites.set_position_ex(handle, x, y, z);
+            } else {
+                sprites.set_rotate_ex(handle, x as f32, y as f32, z as f32);
+            }
         }
         ExtCallOutcome::Value(1)
     }
@@ -12288,6 +12271,20 @@ impl ScriptRuntime {
 
     /// Game category 3 index 34 (`sub_425870`) stores one native per-sprite
     /// parameter at ctx+666396.
+    /// Game category 3 index 33 (trenka.exe 0x4264E0) pops a sprite slot and
+    /// clears its motion program through native 0x447180.
+    fn ext_sp_anime_clear(&mut self, sprites: Option<&mut SpriteSystem>) -> ExtCallOutcome {
+        let args = self.pop_ext_args(1);
+        let Some(&slot) = args.first() else {
+            return ExtCallOutcome::Block;
+        };
+        self.game_sprite_pending_named_animations.remove(&slot);
+        if let (Some(&handle), Some(sprites)) = (self.game_sprites.get(&slot), sprites) {
+            sprites.clear_motion(handle);
+        }
+        ExtCallOutcome::Value(1)
+    }
+
     fn ext_sp_set_anim_param(&mut self) -> ExtCallOutcome {
         let args = self.pop_ext_args(2);
         if args.len() < 2 {
@@ -16035,24 +16032,6 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 // Game.exe 0x49C3D0 probes WMV, MPG, then AVI. The debug PAL_d.dll
 // MP4 branch is incomplete and does not establish release-build support.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NamedSpriteAnimation {
-    MoveBy {
-        dx: i32,
-        dy: i32,
-        dz: i32,
-        duration_ms: u32,
-    },
-    ScaleBy {
-        delta_percent: i32,
-        duration_ms: u32,
-    },
-    AlphaBy {
-        delta: i32,
-        duration_ms: u32,
-    },
-}
-
 /// PAL group selected by the last SE play operand (native table {5, 4, 6}).
 /// Out-of-range selectors read past the native table; keep the SE group.
 fn se_play_group(selector: i32) -> PalSoundGroup {
@@ -16061,50 +16040,6 @@ fn se_play_group(selector: i32) -> PalSoundGroup {
         2 => PalSoundGroup::GROUP6,
         _ => PalSoundGroup::GROUP4,
     }
-}
-
-fn parse_named_sprite_animation(bytes: &[u8]) -> Option<NamedSpriteAnimation> {
-    if bytes.len() >= 0x1a && bytes[0] == 0xfc && bytes[1] == 0x13 && bytes[2] == 0xfd {
-        let property = bytes[3];
-        return match property {
-            0 => Some(NamedSpriteAnimation::MoveBy {
-                dx: read_i32_le_at(bytes, 0x04)?,
-                dy: read_i32_le_at(bytes, 0x08)?,
-                dz: read_i32_le_at(bytes, 0x0c)?,
-                duration_ms: read_duration_le_at(bytes, 0x10)?,
-            }),
-            2 => Some(NamedSpriteAnimation::ScaleBy {
-                delta_percent: read_i32_le_at(bytes, 0x04)?,
-                duration_ms: read_duration_le_at(bytes, 0x08)?,
-            }),
-            3 => Some(NamedSpriteAnimation::AlphaBy {
-                delta: read_i32_le_at(bytes, 0x04)?,
-                duration_ms: read_duration_le_at(bytes, 0x08)?,
-            }),
-            other => {
-                log::debug!("[trace-sprite] unsupported named animation property={other}");
-                None
-            }
-        };
-    }
-
-    if bytes.len() >= 0x10 && bytes[0] == 0xfd && bytes[1] == 3 {
-        return Some(NamedSpriteAnimation::AlphaBy {
-            delta: i32::from(i8::from_ne_bytes([bytes[2]])),
-            duration_ms: read_duration_le_at(bytes, 0x06)?,
-        });
-    }
-
-    None
-}
-
-fn read_i32_le_at(bytes: &[u8], offset: usize) -> Option<i32> {
-    let raw = bytes.get(offset..offset + 4)?;
-    Some(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
-}
-
-fn read_duration_le_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(read_i32_le_at(bytes, offset)?.max(1) as u32)
 }
 
 fn place_sprite(

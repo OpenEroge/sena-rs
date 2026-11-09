@@ -41,6 +41,12 @@ pub struct SpriteSystem {
     global_fx: Option<(i32, SpriteFxEffect)>,
     global_fx_render_attached: bool,
     motion_entries: BTreeMap<SpriteHandle, SpriteMotionEntry>,
+    /// Running `.ani` programs; they own the sprites' motion lanes.
+    ani_motions: BTreeMap<SpriteHandle, crate::ani::AniPlayer>,
+    /// Millisecond clock for motion programs (native PaltimeGetTime).
+    motion_clock_ms: u32,
+    motion_random: crate::system::PalRandomState,
+    motion_skipping: bool,
     option_backups: BTreeMap<SpriteHandle, SpriteSurface>,
     registered_profile: bool,
     native_draw_state: crate::scene::blend::NativeDrawState,
@@ -65,6 +71,10 @@ impl SpriteSystem {
             global_fx: None,
             global_fx_render_attached: false,
             motion_entries: BTreeMap::new(),
+            ani_motions: BTreeMap::new(),
+            motion_clock_ms: 0,
+            motion_random: crate::system::PalRandomState::default(),
+            motion_skipping: false,
             option_backups: BTreeMap::new(),
             registered_profile: false,
             native_draw_state: crate::scene::blend::NativeDrawState::default(),
@@ -277,6 +287,7 @@ impl SpriteSystem {
             self.fx_effects.remove(&effect);
         }
         self.motion_entries.remove(&handle);
+        self.ani_motions.remove(&handle);
         self.option_backups.remove(&handle);
         if let Some(render_node) = sprite.render_node {
             self.render_nodes.remove(&render_node);
@@ -424,11 +435,133 @@ impl SpriteSystem {
         true
     }
 
+    /// Native skip mode makes motion waits finish at once.
+    pub fn set_motion_skipping(&mut self, skipping: bool) {
+        self.motion_skipping = skipping;
+    }
+
+    /// Bind a motion program to a sprite and run it until its first wait.
+    /// A program already on the sprite is cleared first (native 0x447180).
+    /// Returns false when the sprite does not exist.
+    pub fn start_motion(&mut self, handle: SpriteHandle, program: crate::ani::AniProgram) -> bool {
+        if !self.sprites.contains_key(&handle) {
+            return false;
+        }
+        self.clear_motion(handle);
+        let base_position = self.motion_base_position(handle);
+        let mut effects = Vec::new();
+        let random = &mut self.motion_random;
+        let mut next_random = || random.random(false) as u32;
+        let mut ctx = crate::ani::AniContext {
+            now_ms: self.motion_clock_ms,
+            skipping: self.motion_skipping,
+            base_position,
+            random: &mut next_random,
+            effects: &mut effects,
+        };
+        let player = crate::ani::AniPlayer::start(program, &mut ctx);
+        self.apply_motion_effects(handle, &effects);
+        match player {
+            Some(player) => {
+                self.set_motion_lanes(handle, &player.delta());
+                self.ani_motions.insert(handle, player);
+            }
+            None => self.set_motion_lanes(handle, &crate::ani::MotionDelta::default()),
+        }
+        true
+    }
+
+    /// Native 0x447180: stop the program, fold its committed delta into the
+    /// sprite base when it ran opcode 0x13, and drop the motion lanes.
+    pub fn clear_motion(&mut self, handle: SpriteHandle) -> bool {
+        let Some(player) = self.ani_motions.remove(&handle) else {
+            return false;
+        };
+        if let Some(sprite) = self.sprites.get_mut(&handle) {
+            if let Some(delta) = player.persisted_delta() {
+                sprite.commit_action_lanes(SpriteActionLanes::from_motion(&delta));
+            }
+            sprite.motion_lanes = SpriteActionLanes::default();
+        }
+        true
+    }
+
+    pub fn set_position_ex(&mut self, handle: SpriteHandle, x: i32, y: i32, z: i32) -> bool {
+        match self.sprites.get_mut(&handle) {
+            Some(sprite) => {
+                sprite.position_ex = [x as f32, y as f32, z as f32];
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn motion_active(&self, handle: SpriteHandle) -> bool {
+        self.ani_motions.contains_key(&handle)
+    }
+
+    fn motion_base_position(&self, handle: SpriteHandle) -> [i32; 3] {
+        self.sprites.get(&handle).map_or([0; 3], |sprite| {
+            [sprite.position.x as i32, sprite.position.y as i32, sprite.position.z as i32]
+        })
+    }
+
+    fn set_motion_lanes(&mut self, handle: SpriteHandle, delta: &crate::ani::MotionDelta) {
+        if let Some(sprite) = self.sprites.get_mut(&handle) {
+            sprite.motion_lanes = SpriteActionLanes::from_motion(delta);
+        }
+    }
+
+    fn apply_motion_effects(&mut self, handle: SpriteHandle, effects: &[crate::ani::AniEffect]) {
+        for effect in effects {
+            match *effect {
+                crate::ani::AniEffect::RectSetPos(x, y) => {
+                    self.rect_set_pos(handle, x, y);
+                }
+                crate::ani::AniEffect::SetRect([left, top, right, bottom]) => {
+                    self.set_rect(handle, Some(PalRect::new(left, top, right, bottom)));
+                }
+            }
+        }
+    }
+
+    fn advance_ani_motions(&mut self, delta_ms: u32) {
+        self.motion_clock_ms = self.motion_clock_ms.wrapping_add(delta_ms);
+        let handles = self.ani_motions.keys().copied().collect::<Vec<_>>();
+        for handle in handles {
+            if !self.sprites.contains_key(&handle) {
+                self.ani_motions.remove(&handle);
+                continue;
+            }
+            let base_position = self.motion_base_position(handle);
+            let mut effects = Vec::new();
+            let Some(player) = self.ani_motions.get_mut(&handle) else { continue; };
+            let random = &mut self.motion_random;
+            let mut next_random = || random.random(false) as u32;
+            let mut ctx = crate::ani::AniContext {
+                now_ms: self.motion_clock_ms,
+                skipping: self.motion_skipping,
+                base_position,
+                random: &mut next_random,
+                effects: &mut effects,
+            };
+            let running = player.advance(&mut ctx);
+            let delta = player.delta();
+            self.apply_motion_effects(handle, &effects);
+            if running {
+                self.set_motion_lanes(handle, &delta);
+            } else {
+                self.clear_motion(handle);
+            }
+        }
+    }
+
     /// Advances the Game.exe `SpriteMotionEntry` analogue recovered in the
     /// latest IDB.  Native `VmTask_ApplyMotion` walks `gSpriteMotionList` and
     /// commits layered position/scale/color deltas into the wrapped PalSprite;
     /// the Rust port keeps only the currently implemented named-ANI lanes here.
     pub fn advance_motion_entries(&mut self, delta_ms: u32) {
+        self.advance_ani_motions(delta_ms);
         let handles = self.motion_entries.keys().copied().collect::<Vec<_>>();
         for handle in handles {
             let Some(mut entry) = self.motion_entries.remove(&handle) else {
@@ -1404,7 +1537,7 @@ impl SpriteSystem {
             .filter_map(|node| {
                 self.sprites.get(&node.sprite).and_then(|sprite| {
                     let mut command = sprite.draw_command(self)?;
-                    if sprite.action_lanes.position[2] == 0.0 {
+                    if sprite.combined_lanes().position[2] == 0.0 {
                         if let DrawCommand::Sprite(ref mut draw) = command {
                             draw.priority = node.priority;
                         }
@@ -1801,6 +1934,11 @@ pub struct PalSprite {
     pub smooth_upscale: bool,
     /// Game action lanes compose with the base sprite properties before projection.
     pub action_lanes: SpriteActionLanes,
+    /// Motion program (`.ani`) lanes: committed plus in-flight deltas.
+    pub motion_lanes: SpriteActionLanes,
+    /// Script-owned position layer that some Game builds keep beside the
+    /// base position (trenka.exe `sp_set_pos_ex`, wrapper +0x10..0x18).
+    pub position_ex: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1810,6 +1948,8 @@ pub struct SpriteActionLanes {
     pub rotation: [f32; 3],
     pub scale: f32,
     pub alpha: i16,
+    /// Red, green and blue words; only motion programs animate them.
+    pub rgb: [i16; 3],
 }
 
 impl SpriteActionLanes {
@@ -1823,24 +1963,59 @@ impl SpriteActionLanes {
         }
         self.scale += other.scale;
         self.alpha = self.alpha.wrapping_add(other.alpha);
+        for channel in 0..3 {
+            self.rgb[channel] = self.rgb[channel].wrapping_add(other.rgb[channel]);
+        }
+    }
+
+    pub fn from_motion(delta: &crate::ani::MotionDelta) -> Self {
+        Self {
+            position: delta.position.map(|value| value as f32),
+            shake: [0.0; 2],
+            rotation: delta.rotation.map(|value| value as f32),
+            scale: delta.scale,
+            alpha: delta.color[0],
+            rgb: [delta.color[1], delta.color[2], delta.color[3]],
+        }
     }
 }
 
 impl PalSprite {
+    /// Fold `lanes` into the base properties; the live lanes are kept.
     pub(crate) fn commit_action_lanes(&mut self, lanes: SpriteActionLanes) {
-        let temporary = std::mem::replace(&mut self.action_lanes, lanes);
-        let composed = self.with_action_lanes_applied();
+        let composed = self.with_lanes(lanes);
         self.position = composed.position;
         self.rotation = composed.rotation;
         self.scale = composed.scale;
         self.scale_y = composed.scale_y;
         self.color = composed.color;
-        self.action_lanes = temporary;
+    }
+
+    /// Action and motion lanes that currently compose with the base state.
+    pub fn combined_lanes(&self) -> SpriteActionLanes {
+        let mut lanes = self.action_lanes;
+        lanes.add(self.motion_lanes);
+        for axis in 0..3 {
+            lanes.position[axis] += self.position_ex[axis];
+        }
+        lanes
+    }
+
+    fn has_lanes(&self) -> bool {
+        self.action_lanes != SpriteActionLanes::default()
+            || self.motion_lanes != SpriteActionLanes::default()
+            || self.position_ex != [0.0; 3]
     }
 
     fn with_action_lanes_applied(&self) -> Self {
+        self.with_lanes(self.combined_lanes())
+    }
+
+    fn with_lanes(&self, lanes: SpriteActionLanes) -> Self {
         let mut sprite = self.clone();
-        let lanes = std::mem::take(&mut sprite.action_lanes);
+        sprite.action_lanes = SpriteActionLanes::default();
+        sprite.motion_lanes = SpriteActionLanes::default();
+        sprite.position_ex = [0.0; 3];
         sprite.position.x += lanes.position[0] + lanes.shake[0];
         sprite.position.y += lanes.position[1] + lanes.shake[1];
         sprite.position.z += lanes.position[2];
@@ -1851,10 +2026,15 @@ impl PalSprite {
         if let Some(scale_y) = &mut sprite.scale_y {
             *scale_y += lanes.scale;
         }
-        let alpha = i16::from(sprite.color.alpha())
-            .wrapping_add(lanes.alpha)
-            .clamp(0, 255) as u32;
-        sprite.color = PalColor::from_argb((sprite.color.0 & 0x00ff_ffff) | (alpha << 24));
+        let channel = |shift: u32, delta: i16| {
+            (i16::from((sprite.color.0 >> shift) as u8).wrapping_add(delta).clamp(0, 255) as u32) << shift
+        };
+        sprite.color = PalColor::from_argb(
+            channel(24, lanes.alpha)
+                | channel(16, lanes.rgb[0])
+                | channel(8, lanes.rgb[1])
+                | channel(0, lanes.rgb[2]),
+        );
         sprite
     }
 
@@ -1894,11 +2074,13 @@ impl PalSprite {
             native_projection: desc.native_projection,
             smooth_upscale: desc.smooth_upscale,
             action_lanes: SpriteActionLanes::default(),
+            motion_lanes: SpriteActionLanes::default(),
+            position_ex: [0.0; 3],
         }
     }
 
     pub fn info(&self) -> PalSpriteInfo {
-        if self.action_lanes != SpriteActionLanes::default() {
+        if self.has_lanes() {
             return self.with_action_lanes_applied().info();
         }
         PalSpriteInfo {
@@ -2007,21 +2189,20 @@ impl PalSprite {
     }
 
     pub fn effective_position(&self) -> PalPoint2 {
+        let lanes = self.combined_lanes();
         PalPoint2 {
             x: self.offset.x.saturating_add(
-                (self.position.x + self.action_lanes.position[0] + self.action_lanes.shake[0])
-                    as i32,
+                (self.position.x + lanes.position[0] + lanes.shake[0]) as i32,
             ),
             y: self.offset.y.saturating_add(
-                (self.position.y + self.action_lanes.position[1] + self.action_lanes.shake[1])
-                    as i32,
+                (self.position.y + lanes.position[1] + lanes.shake[1]) as i32,
             ),
         }
     }
 
     pub fn effective_priority(&self) -> i32 {
         self.base_priority.wrapping_add(native_truncate_i32(
-            self.position.z + self.action_lanes.position[2],
+            self.position.z + self.combined_lanes().position[2],
         ))
     }
 
@@ -2040,7 +2221,7 @@ impl PalSprite {
     }
 
     fn draw_command_inner(&self, sprites: &SpriteSystem) -> Option<DrawCommand> {
-        if self.action_lanes != SpriteActionLanes::default() {
+        if self.has_lanes() {
             return self.with_action_lanes_applied().draw_command_inner(sprites);
         }
         let render_mode = if self.registered_cell_indices || self.render_mode.raw() <= 4 {

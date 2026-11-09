@@ -39,6 +39,13 @@ const TRENKA_REGISTERED_EXTCALLS: &[(u16, u16, u16)] = &[
 ];
 
 impl NativeBuild {
+    /// Sprite category 3 index 14 writes the wrapper position layer in
+    /// trenka.exe (0x429060, "sp_set_pos_ex", +0x10..0x18); the audited
+    /// Game.exe handler writes the rotation layer instead.
+    pub fn sprite_pos_ex_layer(self) -> bool {
+        self == NativeBuild::Trenka
+    }
+
     /// Whether this build's wrapper at `category:index` follows the
     /// registered contract independently of the DLL capability markers.
     pub fn shares_registered_extcall(self, category: u16, index: u16) -> bool {

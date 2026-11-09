@@ -115,7 +115,7 @@ impl ScriptRuntime {
             let parent_pos = [parent.position.x, parent.position.y];
             let base = std::array::from_fn::<_, 2, _>(|axis| {
                 let local = offset[axis]
-                    .wrapping_add(children::truncate_native(child.action_lanes.position[axis]));
+                    .wrapping_add(children::truncate_native(child.combined_lanes().position[axis]));
                 let centers = ((parent_size[axis] >> 1) as i32)
                     .wrapping_sub((child_size[axis] >> 1) as i32)
                     .wrapping_sub(local);

@@ -135,7 +135,7 @@ impl ScriptRuntime {
                 .get(&lane.child_slot)
                 .copied()
                 .unwrap_or_default();
-            let local_actions = child.action_lanes;
+            let local_actions = child.combined_lanes();
             let parent_scale = [parent.scale, parent.scale_y.unwrap_or(parent.scale)];
             let child_scale = std::array::from_fn::<_, 2, _>(|axis| {
                 parent_scale[axis] + offsets.scale_delta[axis]
