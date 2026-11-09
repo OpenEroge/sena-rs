@@ -6247,8 +6247,15 @@ impl ScriptRuntime {
                 ExtCallOutcome::Value(1)
             }
             55 => {
-                self.pop_ext_args(0);
-                ExtCallOutcome::Value(self.font_state.color().0 as i32)
+                // get_font_color (trenka 0x4384F0, Reference sub_437FC0) pops
+                // a selector: 0 reads the text colour, anything else the
+                // effect colour.
+                let args = self.pop_ext_args(1);
+                let Some(&selector) = args.first() else {
+                    return ExtCallOutcome::Block;
+                };
+                let (text, effect) = self.font_state.color();
+                ExtCallOutcome::Value(if selector == 0 { text } else { effect } as i32)
             }
             _ => ExtCallOutcome::Skip,
         }
@@ -18868,6 +18875,20 @@ mod tests {
         assert_eq!(vm.stack, vec![7]);
         assert!(!vm.game_sprites.contains_key(&30));
         assert!(vm.retired_sprites.iter().any(|retired| retired.handle == handle));
+    }
+
+    #[test]
+    fn get_font_color_pops_its_selector() {
+        let (assets, points) = empty_core_assets(false);
+        let mut vm = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        vm.font_state.set_color(0x00FF_0000, 0x0000_00FF);
+        for (selector, expected) in [(0, 0x00FF_0000), (1, 0x0000_00FF)] {
+            vm.stack = vec![5, selector];
+            let outcome =
+                vm.dispatch_extcall(9, 55, &[], &assets, &points, None, None, None, None, None);
+            assert_eq!(outcome, ExtCallOutcome::Value(expected));
+            assert_eq!(vm.stack, vec![5]);
+        }
     }
 
     #[test]
