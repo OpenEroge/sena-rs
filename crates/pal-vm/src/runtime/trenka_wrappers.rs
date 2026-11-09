@@ -36,6 +36,9 @@ impl ScriptRuntime {
                 self.system_state.set_cursor_null(true);
                 self.pop_operands(3, ExtCallOutcome::Value(1))
             }
+            // 0x41DD50 and 0x41DD60 jump into AdvDebugOutputCore (0x41D990)
+            // like 15:4: a format and seven values, debug output only.
+            (18, 90 | 92) => self.pop_operands(8, ExtCallOutcome::Continue),
             // 0x411F10 shows a message box; 0x411B00 only logs its operand.
             (15, 1 | 9) => self.pop_operands(1, ExtCallOutcome::Continue),
             // 0x4182C0 returns a stamp decoded from the executable image;
